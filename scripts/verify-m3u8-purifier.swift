@@ -388,6 +388,7 @@ struct VerifyM3U8Purifier {
             xiguaMasterURL: xiguaMaster,
             xiguaVariantURL: xiguaManifest
         ])
+        UserDefaults.standard.set(true, forKey: M3U8PurifierSettings.key)
         let xiguaPrepared = await M3U8Purifier.shared.prepare(
             urlString: xiguaMasterURL,
             headers: ["User-Agent": "Xigua test"],
