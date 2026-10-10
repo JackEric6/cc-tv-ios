@@ -46,6 +46,38 @@ jobs:
             -o /tmp/verify-playback-request-headers
           /tmp/verify-playback-request-headers
 
+      - name: Verify Android-compatible playback line selection
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/PlaybackLineSelectionPolicy.swift \
+            scripts/verify-playback-line-selection.swift \
+            -o /tmp/verify-playback-line-selection
+          /tmp/verify-playback-line-selection
+
+      - name: Verify configured source endpoint fallback
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/SourceEndpointRequestPolicy.swift \
+            scripts/verify-source-endpoint-fallback.swift \
+            -o /tmp/verify-source-endpoint-fallback
+          /tmp/verify-source-endpoint-fallback
+
+      - name: Verify Android-compatible CMS request headers
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/CMSRequestHeaderPolicy.swift \
+            scripts/verify-cms-request-headers.swift \
+            -o /tmp/verify-cms-request-headers
+          /tmp/verify-cms-request-headers
+
+      - name: Verify CMS playback playlist normalization
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/PlaybackPlaylistNormalizer.swift \
+            scripts/verify-playback-playlist-normalizer.swift \
+            -o /tmp/verify-playback-playlist-normalizer
+          /tmp/verify-playback-playlist-normalizer
+
       - name: Verify M3U8 purification and playback safety
         run: |
           swiftc -parse-as-library -framework Network \

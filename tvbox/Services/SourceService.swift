@@ -445,11 +445,15 @@ class SourceService {
         }
         video.sourceKey = sourceBean.key
 
-        let playFrom = first["vod_play_from"] as? String ?? ""
-        let playUrl = first["vod_play_url"] as? String ?? ""
+        let normalizedPlaylists = PlaybackPlaylistNormalizer.normalize(
+            playFrom: first["vod_play_from"] ?? first["play_from"] ?? first["playFrom"]
+                ?? first["vod_play_flag"] ?? first["vod_play_source"],
+            playURL: first["vod_play_url"] ?? first["play_url"] ?? first["playUrl"]
+                ?? first["vod_url"] ?? first["url"]
+        )
         let playback = filteredPlaybackLines(
-            playFrom: playFrom,
-            playUrl: playUrl,
+            playFrom: normalizedPlaylists.playFrom,
+            playUrl: normalizedPlaylists.playURL,
             sourceBean: sourceBean
         )
         return VodInfo.from(video: video, playFrom: playback.playFrom, playUrl: playback.playUrl)
@@ -817,28 +821,97 @@ class SourceService {
         sourceBean: SourceBean,
         expectation: ResponseExpectation = .any
     ) async throws -> String {
-        let response = try await network.getString(
+        try await getSourceString(
             from: url,
-            headers: sourceBean.headers,
+            sourceBean: sourceBean,
+            expectation: expectation,
             timeout: min(max(sourceBean.timeout ?? 8, 3), 12),
             maxRetries: 1
         )
-        try validateResponse(response, sourceBean: sourceBean, expectation: expectation)
-        return response
     }
 
     /// 搜索专用请求策略：比列表请求略宽容，容纳响应较慢的资源站。
     private func getSearchString(from url: String, sourceBean: SourceBean) async throws -> String {
         let configuredTimeout = sourceBean.timeout ?? 12
         let timeout = min(max(configuredTimeout, 6), 12)
-        let response = try await network.getString(
+        return try await getSourceString(
             from: url,
-            headers: sourceBean.headers,
+            sourceBean: sourceBean,
+            expectation: .catalog,
             timeout: timeout,
             maxRetries: 1
         )
-        try validateResponse(response, sourceBean: sourceBean, expectation: .catalog)
-        return response
+    }
+
+    private func getSourceString(
+        from url: String,
+        sourceBean: SourceBean,
+        expectation: ResponseExpectation,
+        timeout: Int,
+        maxRetries: Int
+    ) async throws -> String {
+        let candidates = SourceEndpointRequestPolicy.candidates(
+            for: url,
+            backupAPIs: sourceBean.backupApi,
+            backupDomains: sourceBean.backupDomain
+        )
+        var lastError: Error?
+        var emptyCatalogResponse: String?
+        for (index, candidate) in candidates.enumerated() {
+            do {
+                let response = try await network.getString(
+                    from: candidate,
+                    headers: sourceBean.type == 1
+                        ? CMSRequestHeaderPolicy.headers(for: candidate, configured: sourceBean.headers)
+                        : sourceBean.headers,
+                    timeout: index == 0 ? timeout : min(timeout, 6),
+                    maxRetries: index == 0 ? maxRetries : 0
+                )
+                try validateResponse(response, sourceBean: sourceBean, expectation: expectation)
+                if isUnavailableCatalogResponse(response, requestURL: candidate, sourceBean: sourceBean) {
+                    if isValidEmptyCatalogResponse(response) {
+                        emptyCatalogResponse = response
+                    }
+                    lastError = SourceError.invalidResponse("当前接口没有返回视频，继续尝试备用地址")
+                    continue
+                }
+                return response
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                if Task.isCancelled { throw CancellationError() }
+                lastError = error
+            }
+        }
+        if let emptyCatalogResponse { return emptyCatalogResponse }
+        throw lastError ?? SourceError.invalidResponse("所有主备接口均未返回有效数据")
+    }
+
+    private func isUnavailableCatalogResponse(
+        _ response: String,
+        requestURL: String,
+        sourceBean: SourceBean
+    ) -> Bool {
+        guard sourceBean.type == 1,
+              let components = URLComponents(string: requestURL) else { return false }
+        let queryItems = components.queryItems ?? []
+        let requestsVideos = queryItems.contains {
+            ($0.name.caseInsensitiveCompare("wd") == .orderedSame && !($0.value ?? "").isEmpty)
+                || ($0.name.caseInsensitiveCompare("ac") == .orderedSame
+                    && $0.value?.caseInsensitiveCompare("detail") == .orderedSame)
+        }
+        guard requestsVideos else { return false }
+        guard let data = response.data(using: .utf8),
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let list = root["list"] as? [[String: Any]] else { return true }
+        return list.isEmpty
+    }
+
+    private func isValidEmptyCatalogResponse(_ response: String) -> Bool {
+        guard let data = response.data(using: .utf8),
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let list = root["list"] as? [[String: Any]] else { return false }
+        return list.isEmpty
     }
 
     private func getPlaybackPage(from url: String, sourceBean: SourceBean) async throws -> String {
@@ -874,8 +947,8 @@ class SourceService {
 
     private func defaultPlaybackHeaders(for url: String) -> [String: String] {
         var headers = [
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "User-Agent": PlaybackRequestHeaderPolicy.androidDefaultUserAgent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/json;q=0.9"
         ]
 
         guard let components = URLComponents(string: url),
@@ -962,10 +1035,11 @@ class SourceService {
         // 这些源同时返回网页解析线路和 m3u8 线路。点播端按安卓配置只保留
         // 指定的稳定线路，并始终从同一条记录取 flag 与 URL，避免串线。
         if let requiredFlag = requiredPlaybackFlag(for: sourceBean) {
-            paired = paired.filter {
-                $0.flag.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == requiredFlag
+            let matching = paired.filter {
+                $0.flag.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased().contains(requiredFlag)
             }
-            guard !paired.isEmpty else { return ("", "") }
+            if !matching.isEmpty { paired = matching }
         }
         let ordered = paired.sorted { lhs, rhs in
             let leftPriority = playbackLinePriority(lhs.url)
@@ -985,12 +1059,13 @@ class SourceService {
 
         let filteredFlags = normalizedPlayFrom.components(separatedBy: "$$$")
         let filteredURLs = normalizedPlayUrl.components(separatedBy: "$$$")
-        guard let index = filteredFlags.firstIndex(where: {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "dyttm3u8"
-        }), filteredURLs.indices.contains(index) else {
-            return ("", "")
+        guard let index = PlaybackLineSelectionPolicy.preferredDyttLineIndex(
+            flags: filteredFlags,
+            urls: filteredURLs
+        ), filteredURLs.indices.contains(index) else {
+            return (normalizedPlayFrom, normalizedPlayUrl)
         }
-        return ("dyttm3u8", filteredURLs[index])
+        return (filteredFlags[index], filteredURLs[index])
     }
 
     private func playbackLinePriority(_ rawURL: String) -> Int {

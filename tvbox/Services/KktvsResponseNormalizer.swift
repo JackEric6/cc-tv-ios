@@ -7,7 +7,7 @@ import Foundation
 /// 能安全识别的 `url`/`play` 参数，不依赖 Java、JAR 或本地桥接服务。
 enum KktvsResponseNormalizer {
     private static let mediaExtensions = [
-        ".m3u8", ".mp4", ".flv", ".mkv", ".webm", ".mov"
+        ".m3u8", ".m3u", ".mpd", ".mp4", ".flv", ".mkv", ".webm", ".mov"
     ]
 
     static func normalize(_ response: String) -> String {
@@ -49,6 +49,9 @@ enum KktvsResponseNormalizer {
     /// 供播放前使用：先处理协议相对地址和播放器页查询参数。
     static func normalizeMediaURL(_ value: String) -> String {
         var url = unescape(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        if url.lowercased().hasPrefix("video://") {
+            url = String(url.dropFirst("video://".count))
+        }
         if url.hasPrefix("//") {
             url = "https:" + url
         }

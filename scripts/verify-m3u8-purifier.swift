@@ -396,7 +396,7 @@ struct VerifyM3U8Purifier {
         )
         precondition(
             NetworkManager.shared.requestedURLs == [xiguaMasterURL, xiguaVariantURL],
-            "Xigua playback did not fetch the master and resolved media playlist in order"
+            "Xigua playback requested \(NetworkManager.shared.requestedURLs); expected the master and resolved media playlist"
         )
         precondition(
             xiguaPrepared.url == xiguaMasterURL

@@ -52,6 +52,11 @@ struct CmsNormalizerSmokeTest {
             "extensionless nested media URLs were not unwrapped"
         )
         precondition(
+            KktvsResponseNormalizer.directMediaURL("video://https://media.test/stream.mpd")
+                == "https://media.test/stream.mpd",
+            "Android video:// wrapper or DASH URL was not normalized"
+        )
+        precondition(
             KktvsResponseNormalizer.isHLSPlaylist("\u{FEFF}  #EXTM3U\r\n#EXTINF:6.0,\r\nsegment.ts"),
             "extensionless HLS response was not detected"
         )
