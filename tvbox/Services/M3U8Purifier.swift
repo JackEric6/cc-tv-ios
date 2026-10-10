@@ -70,13 +70,12 @@ actor M3U8Purifier {
         }
 
         do {
-            let firstContent = try await network.getString(
+            let firstContent = Self.normalizeManifest(try await network.getString(
                 from: url.absoluteString,
                 headers: headers.isEmpty ? nil : headers,
                 maxRetries: 1
-            )
-            guard firstContent.trimmingCharacters(in: .whitespacesAndNewlines)
-                .hasPrefix("#EXTM3U") else {
+            ))
+            guard firstContent.hasPrefix("#EXTM3U") else {
                 return PreparedURL(url: urlString, didPurify: false, removedSegmentCount: 0)
             }
 
@@ -84,11 +83,11 @@ actor M3U8Purifier {
             let content: String
             if let variant = M3U8ManifestParser.firstVariantURL(in: firstContent, baseURL: url) {
                 targetURL = variant
-                content = try await network.getString(
+                content = Self.normalizeManifest(try await network.getString(
                     from: variant.absoluteString,
                     headers: headers.isEmpty ? nil : headers,
                     maxRetries: 1
-                )
+                ))
             } else {
                 targetURL = url
                 content = firstContent
@@ -130,12 +129,12 @@ actor M3U8Purifier {
         return value.contains(".m3u8") || url.pathExtension.lowercased() == "m3u"
     }
 
-    private static func normalizedLines(_ content: String) -> [String] {
+    private static func normalizeManifest(_ content: String) -> String {
         content
             .replacingOccurrences(of: "\u{FEFF}", with: "")
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
-            .components(separatedBy: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
