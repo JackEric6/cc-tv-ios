@@ -3,6 +3,12 @@ import Foundation
 @main
 struct VerifyDanmakuTimeline {
     static func main() {
+        precondition(DanmakuTimelinePolicy.isPlaybackActive(isPlaying: true))
+        precondition(!DanmakuTimelinePolicy.isPlaybackActive(isPlaying: false))
+        precondition(DanmakuTimelinePolicy.shouldDisplayCue(age: 2, duration: 8))
+        precondition(DanmakuTimelinePolicy.shouldDisplayCue(age: 7.5, duration: 8))
+        precondition(!DanmakuTimelinePolicy.shouldDisplayCue(age: 8.1, duration: 8))
+        precondition(!DanmakuTimelinePolicy.shouldDisplayCue(age: -.infinity, duration: 8))
         precondition(!DanmakuTimelinePolicy.didSeekBackward(from: nil, to: 0))
         precondition(!DanmakuTimelinePolicy.didSeekBackward(from: 3, to: 4.5))
         precondition(!DanmakuTimelinePolicy.didSeekBackward(from: 10, to: 9.6))

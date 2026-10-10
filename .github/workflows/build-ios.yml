@@ -38,6 +38,14 @@ jobs:
             -o /tmp/verify-playback-route-failover
           /tmp/verify-playback-route-failover
 
+      - name: Verify source playback request headers
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/PlaybackRequestHeaderPolicy.swift \
+            scripts/verify-playback-request-headers.swift \
+            -o /tmp/verify-playback-request-headers
+          /tmp/verify-playback-request-headers
+
       - name: Verify M3U8 purification and playback safety
         run: |
           swiftc -parse-as-library -framework Network \

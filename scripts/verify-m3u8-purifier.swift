@@ -3,6 +3,14 @@ import Foundation
 final class NetworkManager {
     static let shared = NetworkManager()
     private(set) var requestCount = 0
+    private(set) var requestedURLs: [String] = []
+    private var responses: [String: String] = [:]
+
+    func configure(responses: [String: String]) {
+        requestCount = 0
+        requestedURLs = []
+        self.responses = responses
+    }
 
     func getString(
         from url: String,
@@ -10,7 +18,9 @@ final class NetworkManager {
         maxRetries: Int = 3
     ) async throws -> String {
         requestCount += 1
-        throw CocoaError(.fileReadUnknown)
+        requestedURLs.append(url)
+        guard let response = responses[url] else { throw CocoaError(.fileReadUnknown) }
+        return response
     }
 }
 
@@ -318,6 +328,7 @@ struct VerifyM3U8Purifier {
         precondition(ambiguousFrameRateResult.content.contains("block-1.ts"))
 
         let originalGuaziURL = "https://guazi.example/video/index.m3u8?token=original"
+        let requestsBeforeGuazi = NetworkManager.shared.requestCount
         let guaziResult = await M3U8Purifier.shared.prepare(
             urlString: originalGuaziURL,
             headers: ["User-Agent": "Guazi"],
@@ -325,7 +336,73 @@ struct VerifyM3U8Purifier {
         )
         precondition(guaziResult.url == originalGuaziURL)
         precondition(!guaziResult.didPurify && guaziResult.removedSegmentCount == 0)
-        precondition(NetworkManager.shared.requestCount == 0)
+        precondition(NetworkManager.shared.requestCount == requestsBeforeGuazi)
+
+        let xiguaMasterURL = "https://svip.xgplay13.com/2025-09-30/35902_episode/index.m3u8?token=master"
+        let xiguaVariantURL = "https://svip.xgplay13.com/2025-09-30/35902_episode/3000k/hls/mixed.m3u8?token=variant"
+        let xiguaMaster = """
+        \u{FEFF}#EXTM3U
+        #EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=800000,RESOLUTION=1080x608
+        3000k/hls/mixed.m3u8?token=variant
+        """
+        .replacingOccurrences(of: "\n", with: "\r\n")
+        precondition(
+            M3U8ManifestParser.firstVariantURL(
+                in: xiguaMaster,
+                baseURL: URL(string: xiguaMasterURL)!
+            )?.absoluteString == xiguaVariantURL,
+            "Xigua relative variant URL or query token was not preserved"
+        )
+
+        var xiguaLines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-PLAYLIST-TYPE:VOD", "#EXT-X-TARGETDURATION:8"]
+        var xiguaSegmentCount = 0
+        for group in 0..<173 {
+            if group > 0 { xiguaLines.append("#EXT-X-DISCONTINUITY") }
+            let groupSize = group < 171 ? 4 : (group == 171 ? 2 : 1)
+            for offset in 0..<groupSize {
+                let duration = ["4.000", "7.960", "1.160", "3.040"][offset % 4]
+                let id = String(format: "%032d", xiguaSegmentCount + 1)
+                let hash = String(format: "%064d", xiguaSegmentCount + 1)
+                xiguaLines.append("#EXTINF:\(duration),")
+                xiguaLines.append("https://svip.xgplay13.com/2025-09-30/35902_episode/3000k/hls/\(id).ts?hash=\(hash)")
+                xiguaSegmentCount += 1
+            }
+        }
+        xiguaLines.append("#EXT-X-ENDLIST")
+        let xiguaManifest = xiguaLines.joined(separator: "\n")
+        let xiguaFiltered = M3U8ManifestPurifier.purify(
+            baseURL: URL(string: xiguaVariantURL)!,
+            content: xiguaManifest
+        )
+        precondition(xiguaSegmentCount == 687)
+        precondition(
+            xiguaFiltered.removedSegmentCount == 0,
+            "normal Xigua hashed segments were falsely filtered"
+        )
+        precondition(
+            xiguaFiltered.content == xiguaManifest,
+            "Xigua discontinuity groups from the same CDN path changed unexpectedly"
+        )
+
+        NetworkManager.shared.configure(responses: [
+            xiguaMasterURL: xiguaMaster,
+            xiguaVariantURL: xiguaManifest
+        ])
+        let xiguaPrepared = await M3U8Purifier.shared.prepare(
+            urlString: xiguaMasterURL,
+            headers: ["User-Agent": "Xigua test"],
+            sourceKey: "xgzy"
+        )
+        precondition(
+            NetworkManager.shared.requestedURLs == [xiguaMasterURL, xiguaVariantURL],
+            "Xigua playback did not fetch the master and resolved media playlist in order"
+        )
+        precondition(
+            xiguaPrepared.url == xiguaMasterURL
+                && !xiguaPrepared.didPurify
+                && xiguaPrepared.removedSegmentCount == 0,
+            "Xigua should keep the original master URL when generic Android rules find no ads"
+        )
         print("M3U8 PURIFIER AND PLAYBACK SAFETY CHECKS PASSED")
     }
 }

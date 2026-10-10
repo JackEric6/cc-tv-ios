@@ -6,6 +6,33 @@ struct M3U8HostRule: Sendable {
     let regex: [String]
 }
 
+enum M3U8ManifestParser {
+    static func firstVariantURL(in content: String, baseURL: URL) -> URL? {
+        let lines = content
+            .replacingOccurrences(of: "\u{FEFF}", with: "")
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+
+        for index in lines.indices where lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            .hasPrefix("#EXT-X-STREAM-INF") {
+            for candidateLine in lines.dropFirst(index + 1) {
+                let candidate = candidateLine.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !candidate.isEmpty, !candidate.hasPrefix("#"), Self.isM3U8URI(candidate) else {
+                    continue
+                }
+                return URL(string: candidate, relativeTo: baseURL)?.absoluteURL
+            }
+        }
+        return nil
+    }
+
+    private static func isM3U8URI(_ value: String) -> Bool {
+        let path = value.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+        return path.lowercased().hasSuffix(".m3u8")
+    }
+}
+
 /// Android 版 M3u8.purify 的 iOS 实现。
 ///
 /// 净化结果只在进程内保存，并通过回环 HTTP 地址交给 KSPlayer。播放清单中的
@@ -55,7 +82,7 @@ actor M3U8Purifier {
 
             let targetURL: URL
             let content: String
-            if let variant = Self.firstVariantURL(in: firstContent, baseURL: url) {
+            if let variant = M3U8ManifestParser.firstVariantURL(in: firstContent, baseURL: url) {
                 targetURL = variant
                 content = try await network.getString(
                     from: variant.absoluteString,
@@ -101,22 +128,6 @@ actor M3U8Purifier {
     private static func looksLikeM3U8(_ url: URL) -> Bool {
         let value = url.absoluteString.lowercased()
         return value.contains(".m3u8") || url.pathExtension.lowercased() == "m3u"
-    }
-
-    private static func firstVariantURL(in content: String, baseURL: URL) -> URL? {
-        let lines = normalizedLines(content)
-        for index in lines.indices where lines[index].hasPrefix("#EXT-X-STREAM-INF") {
-            var next = index + 1
-            while next < lines.count {
-                let candidate = lines[next].trimmingCharacters(in: .whitespacesAndNewlines)
-                if !candidate.isEmpty && !candidate.hasPrefix("#") {
-                    guard candidate.lowercased().contains(".m3u8") else { break }
-                    return URL(string: candidate, relativeTo: baseURL)?.absoluteURL
-                }
-                next += 1
-            }
-        }
-        return nil
     }
 
     private static func normalizedLines(_ content: String) -> [String] {
@@ -903,10 +914,20 @@ struct M3U8ManifestPurifier {
             if isAdURL(item) { stats.adLike = true }
             if let url = URL(string: item) {
                 if stats.host.isEmpty { stats.host = url.host ?? "" }
-                if stats.path.isEmpty { stats.path = url.deletingLastPathComponent().absoluteString }
+                if stats.path.isEmpty { stats.path = mediaPathPrefix(item) ?? "" }
             }
         }
         return stats
+    }
+
+    private static func mediaPathPrefix(_ rawURL: String) -> String? {
+        guard var components = URLComponents(string: rawURL) else { return nil }
+        let path = components.percentEncodedPath
+        guard let slash = path.lastIndex(of: "/") else { return nil }
+        components.percentEncodedPath = String(path[...slash])
+        components.query = nil
+        components.fragment = nil
+        return components.string
     }
 
     private static func normalizeDiscontinuities(_ content: String) -> String {

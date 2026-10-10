@@ -852,7 +852,10 @@ class SourceService {
     }
 
     func playbackHeaders(for sourceBean: SourceBean, mediaURL: String) -> [String: String] {
-        var headers = defaultPlaybackHeaders(for: mediaURL)
+        var headers = PlaybackRequestHeaderPolicy.applyingSourceReferer(
+            to: defaultPlaybackHeaders(for: mediaURL),
+            sourceKey: sourceBean.key
+        )
         if SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name) == .jianpian {
             headers["User-Agent"] = "Mozilla/5.0 packageName:com.jp3.xg3"
             headers["Referer"] = "https://fan123.hzhnl.com/"

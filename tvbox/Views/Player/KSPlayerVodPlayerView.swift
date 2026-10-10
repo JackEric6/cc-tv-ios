@@ -2140,13 +2140,13 @@ private struct KSPlayerUIView: UIViewRepresentable {
             previousButton.alpha = canPlayPrevious ? 1 : 0.45
             nextButton.alpha = canPlayNext ? 1 : 0.45
             episodeButton.isHidden = !isLandscape || !canSelectEpisode
-            introButton.isHidden = !isLandscape
-            outroButton.isHidden = !isLandscape
+            introButton.isHidden = false
+            outroButton.isHidden = false
             rewindButton.isHidden = !isLandscape
             forwardButton.isHidden = !isLandscape
             verticalSeekStack.isHidden = isLandscape
             volumeButton.isHidden = false
-            danmakuButton.isHidden = false
+            danmakuButton.isHidden = !isLandscape
             updateDanmakuButton()
             applyControlVisibility()
         }
@@ -2183,9 +2183,9 @@ private struct KSPlayerUIView: UIViewRepresentable {
                 self.introButton.alpha = alpha
                 self.outroButton.alpha = alpha
                 self.danmakuButton.alpha = alpha
-                self.introButton.isHidden = !self.controlsVisible || !self.isLandscape
-                self.outroButton.isHidden = !self.controlsVisible || !self.isLandscape
-                self.danmakuButton.isHidden = !self.controlsVisible
+                self.introButton.isHidden = !self.controlsVisible
+                self.outroButton.isHidden = !self.controlsVisible
+                self.danmakuButton.isHidden = !self.controlsVisible || !self.isLandscape
             }
         }
 
@@ -2334,8 +2334,8 @@ private struct KSPlayerUIView: UIViewRepresentable {
             slider.sendActions(for: .valueChanged)
         }
 
-        func playerController(state: KSPlayerState) {
-            danmakuView?.setPlaybackActive(state == .bufferFinished)
+        func playerController(state _: KSPlayerState) {
+            updateDanmakuPlaybackActivity()
         }
 
         func playerController(currentTime: TimeInterval, totalTime: TimeInterval) {
@@ -2386,7 +2386,16 @@ private struct KSPlayerUIView: UIViewRepresentable {
         func updateDanmakuTime(currentTime: TimeInterval, duration: TimeInterval) {
             lastPlayerTime = max(0, currentTime.isFinite ? currentTime : 0)
             lastPlayerDuration = max(0, duration.isFinite ? duration : 0)
+            updateDanmakuPlaybackActivity()
             danmakuView?.update(currentTime: lastPlayerTime, duration: lastPlayerDuration, playbackRate: currentPlaybackRate)
+        }
+
+        private func updateDanmakuPlaybackActivity() {
+            danmakuView?.setPlaybackActive(
+                DanmakuTimelinePolicy.isPlaybackActive(
+                    isPlaying: playerView?.playerLayer?.player.isPlaying ?? false
+                )
+            )
         }
 
         private var currentPlaybackRate: Double {

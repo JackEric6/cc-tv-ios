@@ -1,6 +1,10 @@
 import Foundation
 
 enum DanmakuTimelinePolicy {
+    static func isPlaybackActive(isPlaying: Bool) -> Bool {
+        isPlaying
+    }
+
     static func playbackRate(_ value: Double) -> Double {
         guard value.isFinite, value > 0 else { return 1 }
         return min(max(value, 0.25), 4)
@@ -17,6 +21,10 @@ enum DanmakuTimelinePolicy {
               previousTime >= 0,
               currentTime >= 0 else { return false }
         return currentTime < previousTime - max(0, tolerance)
+    }
+
+    static func shouldDisplayCue(age: TimeInterval, duration: TimeInterval) -> Bool {
+        age.isFinite && duration.isFinite && age >= 0 && age <= duration
     }
 
     static func canFollowScrollingBullet(

@@ -91,6 +91,7 @@ final class DanmakuOverlayView: UIView {
         }
         playbackActive = active
         wallClockAnchor = CACurrentMediaTime()
+        displayLink?.isPaused = !active
     }
 
     /// Supplies the current player time. The display link only interpolates between
@@ -174,6 +175,7 @@ final class DanmakuOverlayView: UIView {
         guard displayLink == nil else { return }
         let link = CADisplayLink(target: self, selector: #selector(displayLinkTick(_:)))
         link.add(to: .main, forMode: .common)
+        link.isPaused = !playbackActive
         displayLink = link
     }
 
@@ -185,6 +187,7 @@ final class DanmakuOverlayView: UIView {
     @objc private func displayLinkTick(_ link: CADisplayLink) {
         guard hasTimeAnchor else { return }
         let interpolatedTime = currentTimelineTime()
+        lastRenderedTime = interpolatedTime
         if mediaDuration > 0, interpolatedTime > mediaDuration + 0.5 {
             render(at: mediaDuration)
         } else {
@@ -199,12 +202,17 @@ final class DanmakuOverlayView: UIView {
 
     private func render(at time: TimeInterval) {
         guard bounds.width > 0, bounds.height > 0 else { return }
+        lastRenderedTime = time
         while nextCueIndex < cues.count {
             let cue = cues[nextCueIndex]
             let cueTime = TimeInterval(cue.timeMs) / 1000
             guard cueTime <= time + 0.08 else { break }
             nextCueIndex += 1
-            if time - cueTime <= 1.0, activeBullets.count < maxActiveBullets {
+            let duration: TimeInterval = cue.type == 4 || cue.type == 5
+                ? fixedDuration
+                : settings.scrollDuration
+            if DanmakuTimelinePolicy.shouldDisplayCue(age: time - cueTime, duration: duration),
+               activeBullets.count < maxActiveBullets {
                 enqueue(cue, at: cueTime)
             }
         }
