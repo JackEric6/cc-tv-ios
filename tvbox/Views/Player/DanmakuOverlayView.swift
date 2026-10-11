@@ -19,7 +19,6 @@ final class DanmakuOverlayView: UIView {
     private var rendererLayoutIsReady = false
     private var settings = DanmakuDisplaySettings()
 
-    private let fixedDuration: TimeInterval = 5
     private let maxCuesPerFrame = 40
 
     override init(frame: CGRect) {
@@ -59,7 +58,13 @@ final class DanmakuOverlayView: UIView {
     }
 
     func setCues(_ cues: [DanmuCue]) {
-        self.cues = cues.sorted { $0.timeMs < $1.timeMs }
+        var seen = Set<String>()
+        self.cues = cues
+            .sorted {
+                if $0.timeMs == $1.timeMs { return $0.id < $1.id }
+                return $0.timeMs < $1.timeMs
+            }
+            .filter { seen.insert($0.id).inserted }
         reset()
     }
 
@@ -249,9 +254,7 @@ final class DanmakuOverlayView: UIView {
             guard cueTime <= time else { break }
             nextCueIndex += 1
 
-            let mediaDuration = cue.type == 4 || cue.type == 5
-                ? fixedDuration
-                : settings.scrollDuration
+            let mediaDuration = displayDuration(for: cue)
             let age = time - cueTime
             guard DanmakuTimelinePolicy.shouldDisplayCue(age: age, duration: mediaDuration) else { continue }
             emit(cue, age: age, mediaDuration: mediaDuration)
@@ -273,6 +276,18 @@ final class DanmakuOverlayView: UIView {
         )
         let progress = Float(min(max(age / mediaDuration, 0), 1))
         renderer.sync(danmaku: model, at: progress)
+    }
+
+    private func displayDuration(for cue: DanmuCue) -> TimeInterval {
+        let fontSize = max(12, min(36, CGFloat(cue.size) * settings.sizeScale))
+        let font = UIFont.systemFont(ofSize: fontSize)
+        let textSize = (cue.text as NSString).size(withAttributes: [.font: font])
+        let cueWidth = max(24, ceil(textSize.width) + 8)
+        return DanmakuTimelinePolicy.scrollingDuration(
+            baseDuration: settings.scrollDuration,
+            viewportWidth: Double(bounds.width),
+            cueWidth: Double(cueWidth)
+        )
     }
 
     private func displayColor(for cue: DanmuCue) -> UIColor {
@@ -319,13 +334,7 @@ private final class TimedDanmakuCellModel: DanmakuCellModel {
     var identifier: String { cue.id }
     var cellClass: DanmakuCell.Type { TimedDanmakuCell.self }
     var displayTime: Double { mediaDuration / playbackRate }
-    var type: DanmakuCellType {
-        switch cue.type {
-        case 4: return .bottom
-        case 5: return .top
-        default: return .floating
-        }
-    }
+    var type: DanmakuCellType { .floating }
 
     init(
         cue: DanmuCue,

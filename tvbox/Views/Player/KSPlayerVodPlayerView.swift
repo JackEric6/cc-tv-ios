@@ -1548,6 +1548,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
         private var danmakuSettingsPanel: DanmakuSettingsPanelView?
         private var danmakuSearchPanel: DanmakuSearchPanelView?
         private var danmakuTask: Task<Void, Never>?
+        private var danmakuLoadRequestID = UUID()
         private var danmakuSearchTask: Task<Void, Never>?
         private var danmakuResultTask: Task<Void, Never>?
         private var danmakuSearchResults: [DanmuSearchResult] = []
@@ -1642,9 +1643,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             danmakuEpisode = normalizedEpisode
             playerView?.titleLabel.text = normalizedTitle
             loadedDanmakuKey = nil
-            loadingDanmakuKey = nil
-            danmakuTask?.cancel()
-            danmakuTask = nil
+            invalidateDanmakuLoad()
             danmakuSearchTask?.cancel()
             danmakuResultTask?.cancel()
             danmakuSearchPanel?.removeFromSuperview()
@@ -1666,8 +1665,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             updateDanmakuButton()
             updateDanmakuPanel()
             if !enabled {
-                danmakuTask?.cancel()
-                danmakuTask = nil
+                invalidateDanmakuLoad()
                 danmakuSearchTask?.cancel()
                 danmakuResultTask?.cancel()
                 danmakuSearchPanel?.removeFromSuperview()
@@ -1722,8 +1720,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
         }
 
         func tearDownDanmaku() {
-            danmakuTask?.cancel()
-            danmakuTask = nil
+            invalidateDanmakuLoad()
             danmakuSearchTask?.cancel()
             danmakuSearchTask = nil
             danmakuResultTask?.cancel()
@@ -1758,7 +1755,9 @@ private struct KSPlayerUIView: UIViewRepresentable {
             let key = "\(title)\u{1F}\(episode)"
             guard loadedDanmakuKey != key, loadingDanmakuKey != key else { return }
 
-            danmakuTask?.cancel()
+            invalidateDanmakuLoad()
+            let requestID = UUID()
+            danmakuLoadRequestID = requestID
             loadingDanmakuKey = key
             overlay.clear()
             setDanmakuStatus("正在搜索弹幕")
@@ -1767,9 +1766,13 @@ private struct KSPlayerUIView: UIViewRepresentable {
                 let cues = await DanmuService.shared.loadCues(title: title, episode: episode)
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
-                    guard let self, let overlay, self.danmakuView === overlay else { return }
+                    guard let self,
+                          self.danmakuLoadRequestID == requestID,
+                          let overlay,
+                          self.danmakuView === overlay else { return }
                     guard self.loadingDanmakuKey == key else { return }
                     self.loadingDanmakuKey = nil
+                    self.danmakuTask = nil
                     if !cues.isEmpty {
                         self.loadedDanmakuKey = key
                         self.setDanmakuStatus("已加载 \(cues.count) 条弹幕")
@@ -1785,6 +1788,13 @@ private struct KSPlayerUIView: UIViewRepresentable {
                     overlay.update(currentTime: self.lastPlayerTime, duration: self.lastPlayerDuration, playbackRate: self.currentPlaybackRate)
                 }
             }
+        }
+
+        private func invalidateDanmakuLoad() {
+            danmakuLoadRequestID = UUID()
+            danmakuTask?.cancel()
+            danmakuTask = nil
+            loadingDanmakuKey = nil
         }
 
         private func installDanmakuStatus(in view: IOSVideoPlayerView) {
@@ -1847,9 +1857,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
                 return
             }
             loadedDanmakuKey = nil
-            loadingDanmakuKey = nil
-            danmakuTask?.cancel()
-            danmakuTask = nil
+            invalidateDanmakuLoad()
             guard let danmakuView else {
                 setDanmakuStatus("播放器尚未就绪")
                 return
@@ -1862,6 +1870,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
                 setDanmakuStatus("请先开启弹幕")
                 return
             }
+            invalidateDanmakuLoad()
             danmakuSettingsPanel?.removeFromSuperview()
             danmakuSettingsPanel = nil
             danmakuSearchPanel?.removeFromSuperview()
@@ -1884,6 +1893,9 @@ private struct KSPlayerUIView: UIViewRepresentable {
                 self?.danmakuResultRequestID = UUID()
                 panel.removeFromSuperview()
                 if self?.danmakuSearchPanel === panel { self?.danmakuSearchPanel = nil }
+                if let self, self.loadedDanmakuKey == nil, let overlay = self.danmakuView {
+                    self.loadDanmaku(into: overlay)
+                }
             }
             playerView.controllerView.addSubview(panel)
             NSLayoutConstraint.activate([
@@ -1936,9 +1948,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
                   let overlay = danmakuView else { return }
             danmakuSearchTask?.cancel()
             danmakuResultTask?.cancel()
-            danmakuTask?.cancel()
-            danmakuTask = nil
-            loadingDanmakuKey = nil
+            invalidateDanmakuLoad()
             overlay.clear()
             let requestID = UUID()
             danmakuResultRequestID = requestID

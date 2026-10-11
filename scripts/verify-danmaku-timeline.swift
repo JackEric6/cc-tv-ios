@@ -33,6 +33,24 @@ struct VerifyDanmakuTimeline {
             trackHeight: 28
         ) == 84)
         precondition(DanmakuTimelinePolicy.trackHeight(viewportHeight: 390, sizeScale: 1.6) == 48)
+        let shortDuration = DanmakuTimelinePolicy.scrollingDuration(
+            baseDuration: 8,
+            viewportWidth: 390,
+            cueWidth: 40
+        )
+        let longDuration = DanmakuTimelinePolicy.scrollingDuration(
+            baseDuration: 8,
+            viewportWidth: 390,
+            cueWidth: 400
+        )
+        precondition(shortDuration > 8)
+        precondition(longDuration > shortDuration)
+        precondition(abs(430.0 / shortDuration - 790.0 / longDuration) < 0.0001)
+        precondition(DanmakuTimelinePolicy.scrollingDuration(
+            baseDuration: 8,
+            viewportWidth: 0,
+            cueWidth: 40
+        ) == 0)
         precondition(DanmakuTimelinePolicy.isPlaybackActive(isPlaying: true))
         precondition(!DanmakuTimelinePolicy.isPlaybackActive(isPlaying: false))
         precondition(DanmakuTimelinePolicy.shouldDisplayCue(age: 2, duration: 8))

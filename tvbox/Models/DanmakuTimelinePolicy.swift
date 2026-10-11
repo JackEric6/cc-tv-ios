@@ -66,6 +66,19 @@ enum DanmakuTimelinePolicy {
         age.isFinite && duration.isFinite && age >= 0 && age <= duration
     }
 
+    /// Scrolling cells travel one viewport plus their own width. Scaling their
+    /// lifetime by that distance keeps their pixel speed independent of text length.
+    static func scrollingDuration(
+        baseDuration: TimeInterval,
+        viewportWidth: Double,
+        cueWidth: Double
+    ) -> TimeInterval {
+        guard baseDuration.isFinite, baseDuration > 0,
+              viewportWidth.isFinite, viewportWidth > 0,
+              cueWidth.isFinite, cueWidth >= 0 else { return 0 }
+        return baseDuration * (viewportWidth + cueWidth) / viewportWidth
+    }
+
     static func canFollowScrollingBullet(
         previousRightEdge: Double,
         previousSpeed: Double,
