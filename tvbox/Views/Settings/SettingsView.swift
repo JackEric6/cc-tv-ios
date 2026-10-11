@@ -83,6 +83,14 @@ struct SettingsView: View {
                             Label("M3U8 净化", systemImage: "wand.and.stars")
                         }
                         .tint(.orange)
+                        Divider().background(Color.white.opacity(0.1))
+                        Toggle(isOn: Binding(
+                            get: { viewModel.useSystemProxy },
+                            set: { viewModel.setUseSystemProxy($0) }
+                        )) {
+                            Label("使用系统代理", systemImage: "network")
+                        }
+                        .tint(.orange)
                     }
                     
                     // 功能

@@ -66,18 +66,30 @@ actor GuaziService {
     private static let tokenKey = "congcong.guazi.api.token"
     private static let deviceKey = "congcong.guazi.device.key"
     private static let userAgent = "okhttp/5.5.0"
-    private let session: URLSession
+    private var session: URLSession
     private var metadataCache: [String: Metadata] = [:]
     private var playlistBySortID: [String: GuaziPlaylistCatalog.Playlist] = [:]
     private var cachedHomeSorts: [MovieSort.SortData]?
     private var registrationTask: Task<String, Error>?
 
     private init() {
+        session = Self.makeSession()
+    }
+
+    func reloadSessionForProxySetting() {
+        registrationTask?.cancel()
+        registrationTask = nil
+        session.invalidateAndCancel()
+        session = Self.makeSession()
+    }
+
+    private static func makeSession() -> URLSession {
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 25
         configuration.timeoutIntervalForResource = 35
         configuration.waitsForConnectivity = false
-        session = URLSession(configuration: configuration)
+        NetworkProxyPolicy.configure(configuration)
+        return URLSession(configuration: configuration)
     }
 
     func search(keyword: String) async throws -> [Movie.Video] {

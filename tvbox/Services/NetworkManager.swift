@@ -45,7 +45,7 @@ class NetworkManager {
     ]
 
     /// 内部会话对象，统一超时与连接上限配置。
-    private let session: URLSession
+    private var session: URLSession
     /// JSON 解码器。
     private let decoder = JSONDecoder()
 
@@ -60,7 +60,24 @@ class NetworkManager {
         // 失效源不应在系统等待网络可达时长期占住详情/首页请求。
         // 网络恢复由 NetworkMonitor 触发上层重新验证。
         config.waitsForConnectivity = false
+        NetworkProxyPolicy.configure(config)
         self.session = URLSession(configuration: config)
+    }
+
+    /// Recreate the shared request session after the proxy preference changes.
+    /// In-flight requests are cancelled and callers' existing retry policies
+    /// will start a fresh request using the new route.
+    func reloadSessionForProxySetting() {
+        session.invalidateAndCancel()
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 12
+        config.timeoutIntervalForResource = 20
+        config.httpMaximumConnectionsPerHost = 5
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.urlCache = nil
+        config.waitsForConnectivity = false
+        NetworkProxyPolicy.configure(config)
+        session = URLSession(configuration: config)
     }
 
     /// GET 请求获取字符串，支持自动重试。

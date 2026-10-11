@@ -179,6 +179,7 @@ final class DownloadManager: NSObject, ObservableObject {
         configuration.timeoutIntervalForResource = 24 * 60 * 60
         configuration.httpMaximumConnectionsPerHost = 2
         configuration.waitsForConnectivity = true
+        NetworkProxyPolicy.configure(configuration)
         session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
 
         let hlsConfiguration = URLSessionConfiguration.ephemeral
@@ -187,6 +188,7 @@ final class DownloadManager: NSObject, ObservableObject {
         hlsConfiguration.httpMaximumConnectionsPerHost = Self.maxConcurrentHLSRequests
         hlsConfiguration.waitsForConnectivity = true
         hlsConfiguration.networkServiceType = .video
+        NetworkProxyPolicy.configure(hlsConfiguration)
         hlsResourceSession = URLSession(configuration: hlsConfiguration)
 
         // AVAssetDownloadURLSession requires a background configuration on
@@ -201,6 +203,7 @@ final class DownloadManager: NSObject, ObservableObject {
         assetConfiguration.isDiscretionary = false
         assetConfiguration.sessionSendsLaunchEvents = true
         assetConfiguration.waitsForConnectivity = true
+        NetworkProxyPolicy.configure(assetConfiguration)
         assetSession = AVAssetDownloadURLSession(
             configuration: assetConfiguration,
             assetDownloadDelegate: self,
@@ -1703,8 +1706,15 @@ final class DownloadManager: NSObject, ObservableObject {
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
         request.timeoutInterval = 30
         let result: (Data, URLResponse)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 45
+        configuration.waitsForConnectivity = false
+        NetworkProxyPolicy.configure(configuration)
+        let requestSession = URLSession(configuration: configuration)
+        defer { requestSession.invalidateAndCancel() }
         do {
-            result = try await URLSession.shared.data(for: request)
+            result = try await requestSession.data(for: request)
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as URLError where error.code == .cancelled {

@@ -2416,7 +2416,9 @@ private struct KSPlayerUIView: UIViewRepresentable {
         func playerController(bufferedCount _: Int, consumeTime _: TimeInterval) {}
 
         func playerController(seek time: TimeInterval) {
-            danmakuView?.reset()
+            // update() detects the discontinuity and rebuilds the visible window
+            // atomically. A separate reset here briefly removes every cue and
+            // causes a visible flash while the progress bar is released.
             updateDanmakuTime(currentTime: time, duration: lastPlayerDuration)
         }
 

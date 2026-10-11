@@ -6,7 +6,8 @@ struct DanmakuDisplaySettings: Codable, Equatable {
     var randomColors = false
     var speedLevel = 2
     var sizeLevel = 8
-    var fontWeightLevel = 2
+    // Android's DanmakuFlameMaster uses the system's regular typeface by default.
+    var fontWeightLevel = 0
     var rowCount = 3
     var opacity = 90
 
@@ -24,7 +25,7 @@ struct DanmakuDisplaySettings: Codable, Equatable {
         randomColors = try values.decodeIfPresent(Bool.self, forKey: .randomColors) ?? false
         speedLevel = try values.decodeIfPresent(Int.self, forKey: .speedLevel) ?? 2
         sizeLevel = try values.decodeIfPresent(Int.self, forKey: .sizeLevel) ?? 8
-        fontWeightLevel = try values.decodeIfPresent(Int.self, forKey: .fontWeightLevel) ?? 2
+        fontWeightLevel = try values.decodeIfPresent(Int.self, forKey: .fontWeightLevel) ?? 0
         rowCount = try values.decodeIfPresent(Int.self, forKey: .rowCount) ?? 3
         opacity = try values.decodeIfPresent(Int.self, forKey: .opacity) ?? 90
     }

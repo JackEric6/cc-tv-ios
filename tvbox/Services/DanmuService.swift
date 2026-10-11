@@ -25,13 +25,23 @@ public final class DanmuService {
         }
     }
 
-    private let customSession: URLSession
+    private var customSession: URLSession
     private var searchCache: [String: (date: Date, results: [DanmuSearchResult], hadError: Bool)] = [:]
     private var cueCache: [String: (date: Date, cues: [DanmuCue])] = [:]
     private var searchInFlight: [String: Task<[DanmuSearchResult], Error>] = [:]
     private var cueInFlight: [String: Task<[DanmuCue], Error>] = [:]
 
     private init() {
+        customSession = Self.makeSession()
+    }
+
+    /// Rebuild the independent danmaku session when the proxy preference changes.
+    func reloadSessionForProxySetting() {
+        customSession.invalidateAndCancel()
+        customSession = Self.makeSession()
+    }
+
+    private static func makeSession() -> URLSession {
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 20
         configuration.timeoutIntervalForResource = 30
@@ -44,7 +54,8 @@ public final class DanmuService {
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
-        customSession = URLSession(configuration: configuration)
+        NetworkProxyPolicy.configure(configuration)
+        return URLSession(configuration: configuration)
     }
 
     /// Loads a timeline. Network, parsing, cancellation, and malformed data all

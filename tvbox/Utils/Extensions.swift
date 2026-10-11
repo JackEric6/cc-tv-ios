@@ -299,7 +299,7 @@ typealias PlatformImage = UIImage
 final class ImageLoader {
     static let shared = ImageLoader()
     
-    private let session: URLSession
+    private var session: URLSession
     private let urlCache: URLCache
     private let thumbnailMaxPixelSize: CGFloat = 420
     
@@ -308,6 +308,7 @@ final class ImageLoader {
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 20
         config.httpMaximumConnectionsPerHost = 6
+        NetworkProxyPolicy.configure(config)
         let cache = URLCache(
             memoryCapacity: 12 * 1024 * 1024,
             diskCapacity: 120 * 1024 * 1024,
@@ -317,6 +318,20 @@ final class ImageLoader {
         config.requestCachePolicy = .useProtocolCachePolicy
         self.urlCache = cache
         self.session = URLSession(configuration: config)
+    }
+
+    /// Rebuild the image session after the proxy preference changes. Existing
+    /// requests are cancelled so subsequent retries use the new route.
+    func reloadSessionForProxySetting() {
+        session.invalidateAndCancel()
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 20
+        config.httpMaximumConnectionsPerHost = 6
+        NetworkProxyPolicy.configure(config)
+        config.urlCache = urlCache
+        config.requestCachePolicy = .useProtocolCachePolicy
+        session = URLSession(configuration: config)
     }
     
     private static let maxImageRetries = 1

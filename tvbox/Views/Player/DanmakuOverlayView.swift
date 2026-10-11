@@ -253,9 +253,7 @@ final class DanmakuOverlayView: UIView {
             string: cue.text,
             attributes: [
                 .font: font,
-                .foregroundColor: displayColor(for: cue).withAlphaComponent(opacity),
-                .strokeColor: UIColor.black.withAlphaComponent(opacity),
-                .strokeWidth: -max(3.0, 4.0 + CGFloat(settings.fontWeightLevel) * 0.55)
+                .foregroundColor: displayColor(for: cue).withAlphaComponent(opacity)
             ]
         )
         timelineLayer.addSublayer(textLayer)
