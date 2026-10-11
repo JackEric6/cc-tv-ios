@@ -1789,33 +1789,31 @@ private struct KSPlayerUIView: UIViewRepresentable {
             overlay.clear()
             setDanmakuStatus("正在搜索弹幕")
 
-            danmakuTask = Task { [weak self, weak overlay] in
+            danmakuTask = Task { @MainActor [weak self, weak overlay] in
                 let cues = await DanmuService.shared.loadCues(title: title, episode: episode)
-                guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    guard let self,
-                          self.danmakuLoadRequestID == requestID,
-                          let overlay,
-                          self.danmakuView === overlay else { return }
-                    guard self.loadingDanmakuKey == key else { return }
-                    self.loadingDanmakuKey = nil
-                    self.danmakuTask = nil
-                    if !cues.isEmpty {
-                        self.cancelDanmakuRetry(resetAttempts: true)
-                        self.loadedDanmakuKey = key
-                        self.setDanmakuStatus("已加载 \(cues.count) 条弹幕")
-                    } else {
-                        self.setDanmakuStatus("暂未获取到弹幕，稍后重试")
-                        self.scheduleDanmakuRetry(for: key, requestID: requestID, overlay: overlay)
-                    }
-                    overlay.setCues(cues)
-                    overlay.isHidden = !self.danmakuEnabled || cues.isEmpty
-                    overlay.updateSettings(self.danmakuSettings)
-                    // A cue request can finish between two KSPlayer time
-                    // callbacks. Seed the overlay with the latest known time
-                    // so the first comments are rendered immediately.
-                    overlay.update(currentTime: self.lastPlayerTime, duration: self.lastPlayerDuration, playbackRate: self.currentPlaybackRate)
+                guard !Task.isCancelled,
+                      let self,
+                      self.danmakuLoadRequestID == requestID,
+                      let overlay,
+                      self.danmakuView === overlay,
+                      self.loadingDanmakuKey == key else { return }
+                self.loadingDanmakuKey = nil
+                self.danmakuTask = nil
+                if !cues.isEmpty {
+                    self.cancelDanmakuRetry(resetAttempts: true)
+                    self.loadedDanmakuKey = key
+                    self.setDanmakuStatus("已加载 \(cues.count) 条弹幕")
+                } else {
+                    self.setDanmakuStatus("暂未获取到弹幕，稍后重试")
+                    self.scheduleDanmakuRetry(for: key, requestID: requestID, overlay: overlay)
                 }
+                overlay.setCues(cues)
+                overlay.isHidden = !self.danmakuEnabled || cues.isEmpty
+                overlay.updateSettings(self.danmakuSettings)
+                // A cue request can finish between two KSPlayer time
+                // callbacks. Seed the overlay with the latest known time
+                // so the first comments are rendered immediately.
+                overlay.update(currentTime: self.lastPlayerTime, duration: self.lastPlayerDuration, playbackRate: self.currentPlaybackRate)
             }
         }
 

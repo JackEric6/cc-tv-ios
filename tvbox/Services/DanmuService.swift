@@ -79,7 +79,7 @@ public final class DanmuService {
             return cached
         }
         let apiURLs = resolveAPIURLs(configuration)
-        let cues = await firstNonEmpty(from: apiURLs) { [weak self] apiURL in
+        let cues: [DanmuCue] = await firstNonEmpty(from: apiURLs) { [weak self] apiURL in
             guard let self else { return [] }
             do {
                 if Self.isBuiltinAPI(apiURL) {
@@ -380,7 +380,7 @@ public final class DanmuService {
         let requests = episodeQueries.flatMap { episodeQuery in
             Self.searchTitleVariants(query).map { ($0, episodeQuery) }
         }
-        let results = await firstNonEmpty(from: requests) { [weak self] request in
+        let results: [DanmuSearchResult] = await firstNonEmpty(from: requests) { [weak self] request in
             guard let self else { return [] }
             let (variant, episodeQuery) = request
             guard let episodesURL = try? Self.makeURL(
@@ -536,7 +536,7 @@ public final class DanmuService {
         let queries = number > 0 ? [String(number), ""] : [""]
         let titleVariants = Self.searchTitleVariants(title)
         let requests = queries.flatMap { query in titleVariants.map { ($0, query) } }
-        let directCues = await firstNonEmpty(from: requests) { [weak self] request in
+        let directCues: [DanmuCue] = await firstNonEmpty(from: requests) { [weak self] request in
             guard let self else { return [] }
             let (titleVariant, query) = request
             guard let searchURL = try? Self.makeURL(
