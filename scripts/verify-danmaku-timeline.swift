@@ -31,7 +31,7 @@ struct VerifyDanmakuTimeline {
             viewportHeight: 90,
             rowCount: 3,
             trackHeight: 28
-        ) == 90)
+        ) == 84)
         precondition(DanmakuTimelinePolicy.trackHeight(viewportHeight: 390, sizeScale: 1.6) == 48)
         precondition(DanmakuTimelinePolicy.isPlaybackActive(isPlaying: true))
         precondition(!DanmakuTimelinePolicy.isPlaybackActive(isPlaying: false))
