@@ -73,8 +73,8 @@ class DetailViewModel: ObservableObject {
     private var playableResolveTask: Task<Void, Never>?
     private var playableResolveToken = UUID()
     private var purifierFallbackURL: String?
-    private var purifierPlaybackWatchdogTask: Task<Void, Never>?
-    private var purifierPlaybackStartPosition: Double = 0
+    private var playbackStartupWatchdogTask: Task<Void, Never>?
+    private var playbackStartupPosition: Double = 0
     /// 详情加载令牌，用于忽略已过期的渐进回调。
     private var detailLoadToken = UUID()
     /// 当前详情请求是否已用首批可播放数据建立过播放会话。
@@ -144,7 +144,7 @@ class DetailViewModel: ObservableObject {
             return
         }
         attemptedPlaybackFlags.removeAll()
-        cancelPurifierPlaybackWatchdog()
+        cancelPlaybackStartupWatchdog()
         purifierFallbackURL = nil
         let loadToken = UUID()
         detailLoadToken = loadToken
@@ -730,7 +730,7 @@ class DetailViewModel: ObservableObject {
         let progress = max(currentPlaybackSeconds(), 0)
         resumeSeconds = progress
         realtimeProgressSeconds = progress
-        cancelPurifierPlaybackWatchdog()
+        cancelPlaybackStartupWatchdog()
         purifierFallbackURL = nil
         playUrl = validURL
     }
@@ -746,9 +746,9 @@ class DetailViewModel: ObservableObject {
             }
             pendingResumeProtection = nil
         }
-        if purifierPlaybackWatchdogTask != nil,
-           seconds >= purifierPlaybackStartPosition + PlaybackStartupFallbackPolicy.requiredProgressAdvance {
-            cancelPurifierPlaybackWatchdog()
+        if playbackStartupWatchdogTask != nil,
+           seconds >= playbackStartupPosition + PlaybackStartupFallbackPolicy.requiredProgressAdvance {
+            cancelPlaybackStartupWatchdog()
         }
         realtimeProgressSeconds = max(seconds, 0)
         hasRealtimeProgressSnapshot = true
@@ -862,7 +862,7 @@ class DetailViewModel: ObservableObject {
         let requestSourceKey = source.key
         let requestFlag = selectedFlag
         let requestEpisodeIndex = selectedEpisodeIndex
-        cancelPurifierPlaybackWatchdog()
+        cancelPlaybackStartupWatchdog()
         purifierFallbackURL = nil
 
         guard !isDirectPlayableURL(normalized, for: source) else {
@@ -889,13 +889,11 @@ class DetailViewModel: ObservableObject {
                 self.playUrl = prepared.url
                 self.isPlaying = true
                 self.isResolvingPlaybackURL = false
-                if prepared.didPurify {
-                    self.armPurifierPlaybackWatchdog(
-                        preparedURL: prepared.url,
-                        fallbackURL: selectedURL,
-                        token: token
-                    )
-                }
+                self.armPlaybackStartupWatchdog(
+                    preparedURL: prepared.url,
+                    fallbackURL: prepared.didPurify ? selectedURL : nil,
+                    token: token
+                )
             }
             return
         }
@@ -958,13 +956,11 @@ class DetailViewModel: ObservableObject {
             self.isResolvingPlaybackURL = false
             self.errorMessage = nil
             self.shouldRetryAfterNetworkRecovery = false
-            if prepared.didPurify {
-                self.armPurifierPlaybackWatchdog(
-                    preparedURL: prepared.url,
-                    fallbackURL: validURL,
-                    token: token
-                )
-            }
+            self.armPlaybackStartupWatchdog(
+                preparedURL: prepared.url,
+                fallbackURL: prepared.didPurify ? validURL : nil,
+                token: token
+            )
         }
     }
 
@@ -990,19 +986,24 @@ class DetailViewModel: ObservableObject {
         return sourceService.playbackHeaders(for: source, mediaURL: mediaURL)
     }
 
-    func recoverFromPurifierPlaybackFailure() {
+    func recoverFromPlaybackFailure() {
         if let fallbackURL = purifierFallbackURL, playUrl != fallbackURL {
-            cancelPurifierPlaybackWatchdog()
+            cancelPlaybackStartupWatchdog()
             purifierFallbackURL = nil
             playUrl = fallbackURL
             isPlaying = true
             isResolvingPlaybackURL = false
             errorMessage = nil
             shouldRetryAfterNetworkRecovery = false
+            armPlaybackStartupWatchdog(
+                preparedURL: fallbackURL,
+                fallbackURL: nil,
+                token: playableResolveToken
+            )
             return
         }
         guard !advancePlaybackRouteAfterFailure() else { return }
-        cancelPurifierPlaybackWatchdog()
+        cancelPlaybackStartupWatchdog()
         playUrl = nil
         isPlaying = false
         isResolvingPlaybackURL = false
@@ -1028,16 +1029,16 @@ class DetailViewModel: ObservableObject {
         return true
     }
 
-    private func armPurifierPlaybackWatchdog(
+    private func armPlaybackStartupWatchdog(
         preparedURL: String,
-        fallbackURL: String,
+        fallbackURL: String?,
         token: UUID
     ) {
-        cancelPurifierPlaybackWatchdog()
+        cancelPlaybackStartupWatchdog()
         let startingProgress = max(currentPlaybackSeconds(), 0)
-        purifierPlaybackStartPosition = startingProgress
+        playbackStartupPosition = startingProgress
         let timeout = PlaybackStartupFallbackPolicy.timeout
-        purifierPlaybackWatchdogTask = Task { [weak self] in
+        playbackStartupWatchdogTask = Task { [weak self] in
             do {
                 try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
             } catch {
@@ -1049,18 +1050,17 @@ class DetailViewModel: ObservableObject {
                   self.playUrl == preparedURL,
                   self.purifierFallbackURL == fallbackURL,
                   PlaybackStartupFallbackPolicy.shouldFallback(
-                    didPurify: true,
                     elapsed: timeout,
                     startingProgress: startingProgress,
                     currentProgress: self.currentPlaybackSeconds()
                   ) else { return }
-            self.recoverFromPurifierPlaybackFailure()
+            self.recoverFromPlaybackFailure()
         }
     }
 
-    private func cancelPurifierPlaybackWatchdog() {
-        purifierPlaybackWatchdogTask?.cancel()
-        purifierPlaybackWatchdogTask = nil
+    private func cancelPlaybackStartupWatchdog() {
+        playbackStartupWatchdogTask?.cancel()
+        playbackStartupWatchdogTask = nil
     }
 
     /// 返回指定剧集的实际播放地址，供下载任务使用。
@@ -1165,8 +1165,8 @@ class DetailViewModel: ObservableObject {
             return []
         }
         guard let url = URL(string: episodeURL), Self.looksLikeHLSURL(url) else { return [] }
-        guard let playlist = try? await network.getString(from: episodeURL) else { return [] }
-        return Self.parseMasterPlaylist(playlist, masterURL: url)
+        guard let response = try? await network.getStringResponse(from: episodeURL) else { return [] }
+        return Self.parseMasterPlaylist(response.text, masterURL: response.finalURL)
     }
 
     /// HLS 变体流中间模型。

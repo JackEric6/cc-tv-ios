@@ -1,29 +1,12 @@
 #if os(iOS)
+import DanmakuKit
 import UIKit
 
-/// UIKit-only danmaku layer intended to live inside the native player content layer.
-/// It deliberately does not own media time; the player supplies it through `update`.
+/// Media-time scheduler backed by DanmakuKit's asynchronous cells and lane collision checks.
 final class DanmakuOverlayView: UIView {
-    private enum Placement {
-        case scrolling
-        case reverse
-        case top
-        case bottom
-    }
-
-    private struct ActiveBullet {
-        let label: UILabel
-        let placement: Placement
-        let lane: Int
-        let startTime: TimeInterval
-        var duration: TimeInterval
-        let width: CGFloat
-        var speed: CGFloat
-    }
-
+    private let renderer = DanmakuKit.DanmakuView()
     private var cues: [DanmuCue] = []
     private var nextCueIndex = 0
-    private var activeBullets: [ActiveBullet] = []
     private var displayLink: CADisplayLink?
     private var mediaTime: TimeInterval = 0
     private var mediaDuration: TimeInterval = 0
@@ -31,17 +14,11 @@ final class DanmakuOverlayView: UIView {
     private var wallClockAnchor: CFTimeInterval = 0
     private var hasTimeAnchor = false
     private var playbackActive = true
-    private var lastRenderedTime: TimeInterval = 0
     private var lastLayoutSize = CGSize.zero
     private var settings = DanmakuDisplaySettings()
-    private var nextScrollingLane = 0
-    private var nextReverseLane = 0
-    private var nextTopLane = 0
-    private var nextBottomLane = 0
 
-    private let rowHeight: CGFloat = 28
     private let fixedDuration: TimeInterval = 5
-    private let maxActiveBullets = 80
+    private let maxCuesPerFrame = 40
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -58,29 +35,38 @@ final class DanmakuOverlayView: UIView {
         backgroundColor = .clear
         clipsToBounds = true
         accessibilityElementsHidden = true
+
+        renderer.translatesAutoresizingMaskIntoConstraints = false
+        renderer.backgroundColor = .clear
+        renderer.isUserInteractionEnabled = false
+        renderer.enableCellReusable = true
+        renderer.isOverlap = false
+        addSubview(renderer)
+        NSLayoutConstraint.activate([
+            renderer.leadingAnchor.constraint(equalTo: leadingAnchor),
+            renderer.trailingAnchor.constraint(equalTo: trailingAnchor),
+            renderer.topAnchor.constraint(equalTo: topAnchor),
+            renderer.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+        applyTrackSettings()
     }
 
     deinit {
-        stopDisplayLink()
+        displayLink?.invalidate()
+        renderer.stop()
     }
 
-    /// Replaces all cues and starts from the beginning of the supplied timeline.
     func setCues(_ cues: [DanmuCue]) {
         self.cues = cues.sorted { $0.timeMs < $1.timeMs }
         reset()
     }
 
     func updateSettings(_ settings: DanmakuDisplaySettings) {
-        self.settings = settings.normalized
         let now = currentTimelineTime()
-        for index in activeBullets.indices {
-            if activeBullets[index].placement == .scrolling || activeBullets[index].placement == .reverse {
-                activeBullets[index].duration = self.settings.scrollDuration
-                activeBullets[index].speed = (bounds.width + activeBullets[index].width)
-                    / CGFloat(max(0.01, self.settings.scrollDuration))
-            }
-        }
-        lastRenderedTime = now
+        self.settings = settings.normalized
+        applyTrackSettings()
+        renderer.clean()
+        nextCueIndex = lowerBound(for: max(0, now - max(fixedDuration, self.settings.scrollDuration)))
         render(at: now)
     }
 
@@ -91,53 +77,58 @@ final class DanmakuOverlayView: UIView {
         }
         playbackActive = active
         wallClockAnchor = CACurrentMediaTime()
+
+        if active {
+            ensureRendererPlaying()
+        } else if renderer.status == .play {
+            renderer.pause()
+        }
         displayLink?.isPaused = !active
     }
 
-    /// Supplies the current player time. The display link only interpolates between
-    /// these callbacks to keep scrolling smooth while the player is playing.
+    /// The player supplies media time; the display link only interpolates between callbacks.
     func update(currentTime: TimeInterval, duration: TimeInterval = 0, playbackRate: Double = 1) {
-        let boundedTime = max(0, currentTime)
+        let boundedTime = max(0, currentTime.isFinite ? currentTime : 0)
         let hadTimeAnchor = hasTimeAnchor
-        let movedBackward = DanmakuTimelinePolicy.didSeekBackward(
-            from: hadTimeAnchor ? mediaTime : nil,
+        let expectedTime = hadTimeAnchor ? currentTimelineTime() : nil
+        let didSeek = DanmakuTimelinePolicy.didSeek(
+            from: expectedTime,
             to: boundedTime
         )
-        mediaDuration = max(0, duration)
+        let normalizedRate = DanmakuTimelinePolicy.playbackRate(playbackRate)
+        let rateChanged = hadTimeAnchor && abs(self.playbackRate - normalizedRate) > 0.02
+
+        mediaDuration = max(0, duration.isFinite ? duration : 0)
         mediaTime = boundedTime
-        self.playbackRate = DanmakuTimelinePolicy.playbackRate(playbackRate)
+        self.playbackRate = normalizedRate
         wallClockAnchor = CACurrentMediaTime()
         hasTimeAnchor = true
 
-        // Forward progress callbacks can arrive a few seconds apart. Treating
-        // those normal updates as seeks repeatedly cleared cues between ticks.
-        if !hadTimeAnchor || movedBackward {
-            clearActiveBullets()
-            resetLaneIndexes()
-            nextCueIndex = lowerBound(for: boundedTime)
+        if !hadTimeAnchor || didSeek {
+            renderer.clean()
+            let activeWindow = max(fixedDuration, settings.scrollDuration)
+            nextCueIndex = lowerBound(for: max(0, boundedTime - activeWindow))
+        } else if rateChanged {
+            renderer.clean()
+            nextCueIndex = lowerBound(for: max(0, boundedTime - max(fixedDuration, settings.scrollDuration)))
         }
 
-        lastRenderedTime = boundedTime
         if window != nil, !cues.isEmpty {
             startDisplayLinkIfNeeded()
         }
         render(at: boundedTime)
     }
 
-    /// Clears active labels but keeps the loaded cue list.
     func reset() {
-        clearActiveBullets()
-        resetLaneIndexes()
+        renderer.stop()
         nextCueIndex = 0
         mediaTime = 0
         mediaDuration = 0
         playbackRate = 1
-        lastRenderedTime = 0
         wallClockAnchor = CACurrentMediaTime()
         hasTimeAnchor = false
     }
 
-    /// Clears both active labels and loaded cues.
     func clear() {
         reset()
         cues.removeAll(keepingCapacity: false)
@@ -157,18 +148,16 @@ final class DanmakuOverlayView: UIView {
         super.layoutSubviews()
         guard bounds.size != lastLayoutSize else { return }
         lastLayoutSize = bounds.size
+        applyTrackSettings()
+        renderer.recalculateTracks()
         guard hasTimeAnchor, !cues.isEmpty else { return }
+        render(at: currentTimelineTime())
+    }
 
-        // A rotation changes each lane's geometry, but should not restart its clock.
-        let now = currentTimelineTime()
-        for index in activeBullets.indices {
-            if activeBullets[index].placement == .scrolling || activeBullets[index].placement == .reverse {
-                activeBullets[index].speed = (bounds.width + activeBullets[index].width)
-                    / CGFloat(max(0.01, activeBullets[index].duration))
-            }
-        }
-        lastRenderedTime = now
-        render(at: now)
+    private func applyTrackSettings() {
+        let rowCount = max(1, settings.rowCount)
+        renderer.trackHeight = max(20, bounds.height / CGFloat(rowCount))
+        renderer.displayArea = 1
     }
 
     private func startDisplayLinkIfNeeded() {
@@ -186,13 +175,8 @@ final class DanmakuOverlayView: UIView {
 
     @objc private func displayLinkTick(_ link: CADisplayLink) {
         guard hasTimeAnchor else { return }
-        let interpolatedTime = currentTimelineTime()
-        lastRenderedTime = interpolatedTime
-        if mediaDuration > 0, interpolatedTime > mediaDuration + 0.5 {
-            render(at: mediaDuration)
-        } else {
-            render(at: interpolatedTime)
-        }
+        let time = currentTimelineTime()
+        render(at: mediaDuration > 0 ? min(time, mediaDuration) : time)
     }
 
     private func currentTimelineTime() -> TimeInterval {
@@ -202,169 +186,57 @@ final class DanmakuOverlayView: UIView {
 
     private func render(at time: TimeInterval) {
         guard bounds.width > 0, bounds.height > 0 else { return }
-        lastRenderedTime = time
-        while nextCueIndex < cues.count {
+        ensureRendererPlaying()
+
+        var emitted = 0
+        while nextCueIndex < cues.count, emitted < maxCuesPerFrame {
             let cue = cues[nextCueIndex]
             let cueTime = TimeInterval(cue.timeMs) / 1000
-            guard cueTime <= time + 0.08 else { break }
+            guard cueTime <= time else { break }
             nextCueIndex += 1
-            let duration: TimeInterval = cue.type == 4 || cue.type == 5
+
+            let mediaDuration = cue.type == 4 || cue.type == 5
                 ? fixedDuration
                 : settings.scrollDuration
-            if DanmakuTimelinePolicy.shouldDisplayCue(age: time - cueTime, duration: duration),
-               activeBullets.count < maxActiveBullets {
-                enqueue(cue, at: cueTime)
-            }
+            let age = time - cueTime
+            guard DanmakuTimelinePolicy.shouldDisplayCue(age: age, duration: mediaDuration) else { continue }
+            emit(cue, age: age, mediaDuration: mediaDuration)
+            emitted += 1
         }
-
-        var remaining: [ActiveBullet] = []
-        for bullet in activeBullets {
-            let age = time - bullet.startTime
-            guard age >= 0, age <= bullet.duration else {
-                bullet.label.removeFromSuperview()
-                continue
-            }
-            position(bullet, age: age)
-            remaining.append(bullet)
-        }
-        activeBullets = remaining
     }
 
-    private func enqueue(_ cue: DanmuCue, at cueTime: TimeInterval) {
-        let placement: Placement
-        switch cue.type {
-        // Match Android's Bilibili mode mapping: 6 scrolls in the opposite direction.
-        case 4: placement = .bottom
-        case 5: placement = .top
-        case 6: placement = .reverse
-        default: placement = .scrolling
-        }
+    private func emit(_ cue: DanmuCue, age: TimeInterval, mediaDuration: TimeInterval) {
+        let size = max(12, min(36, CGFloat(cue.size) * settings.sizeScale))
+        let font = UIFont.systemFont(ofSize: size)
+        let color = displayColor(for: cue)
+        let model = TimedDanmakuCellModel(
+            cue: cue,
+            font: font,
+            color: color,
+            opacity: CGFloat(settings.opacity) / 100,
+            mediaDuration: mediaDuration,
+            playbackRate: playbackRate
+        )
+        let progress = Float(min(max(age / mediaDuration, 0), 1))
+        renderer.sync(danmaku: model, at: progress)
+    }
 
-        let label = UILabel()
-        label.text = cue.text
-        let displayColor: UInt32
+    private func displayColor(for cue: DanmuCue) -> UIColor {
         if settings.randomColors {
             let palette: [UInt32] = [0xFFFFFF, 0xFF6B6B, 0xFFD166, 0x62D6A5, 0x72B7FF, 0xE7A6FF]
-            displayColor = palette[Int(UInt(bitPattern: cue.id.hashValue) % UInt(palette.count))]
-        } else {
-            displayColor = UInt32(truncatingIfNeeded: cue.color)
+            let hash = cue.id.utf8.reduce(0) { ($0 &* 31 &+ Int($1)) % palette.count }
+            return UIColor(rgb: palette[hash])
         }
-        label.textColor = UIColor(rgba: displayColor, alpha: CGFloat(settings.opacity) / 100)
-        label.font = .systemFont(ofSize: max(12, min(36, CGFloat(cue.size) * settings.sizeScale)))
-        label.textAlignment = .center
-        label.numberOfLines = 1
-        label.lineBreakMode = .byTruncatingTail
-        label.layer.shadowColor = UIColor.black.cgColor
-        label.layer.shadowOpacity = 0.85
-        label.layer.shadowRadius = 1.5
-        label.layer.shadowOffset = .zero
-        label.sizeToFit()
-        let width = max(label.bounds.width, 24)
-        label.bounds.size = CGSize(width: width, height: rowHeight)
-
-        let duration = placement == .scrolling || placement == .reverse
-            ? settings.scrollDuration
-            : fixedDuration
-        let speed = (bounds.width + width) / CGFloat(max(0.01, duration))
-        guard let lane = availableLane(for: placement, at: cueTime, speed: speed) else {
-            label.removeFromSuperview()
-            return
-        }
-        let bullet = ActiveBullet(label: label, placement: placement, lane: lane,
-                                  startTime: cueTime, duration: duration,
-                                  width: width, speed: speed)
-        addSubview(label)
-        activeBullets.append(bullet)
-        position(bullet, age: max(0, lastRenderedTime - cueTime))
+        return UIColor(rgb: UInt32(truncatingIfNeeded: cue.color))
     }
 
-    private func position(_ bullet: ActiveBullet, age: TimeInterval) {
-        let laneCount = min(settings.rowCount, max(1, Int(bounds.height / rowHeight)))
-        let laneY = CGFloat(min(max(bullet.lane, 0), laneCount - 1)) * rowHeight
-        switch bullet.placement {
-        case .scrolling:
-            bullet.label.frame = CGRect(x: bounds.width - bullet.speed * CGFloat(age),
-                                        y: laneY, width: bullet.width, height: rowHeight)
-        case .reverse:
-            bullet.label.frame = CGRect(x: -bullet.width + bullet.speed * CGFloat(age),
-                                        y: laneY, width: bullet.width, height: rowHeight)
-        case .top:
-            bullet.label.frame = CGRect(x: (bounds.width - bullet.width) / 2,
-                                        y: laneY, width: bullet.width, height: rowHeight)
-        case .bottom:
-            let y = bounds.height - rowHeight * CGFloat(min(max(bullet.lane + 1, 1), laneCount))
-            bullet.label.frame = CGRect(x: (bounds.width - bullet.width) / 2,
-                                        y: max(0, y), width: bullet.width, height: rowHeight)
+    private func ensureRendererPlaying() {
+        if renderer.status != .play {
+            renderer.play()
         }
-    }
-
-    private func availableLane(for placement: Placement, at time: TimeInterval, speed: CGFloat) -> Int? {
-        let laneCount = min(settings.rowCount, max(1, Int(bounds.height / rowHeight)))
-        guard laneCount > 0 else { return nil }
-        let startLane = nextLaneIndex(for: placement) % laneCount
-        let moving = placement == .scrolling || placement == .reverse
-
-        for offset in 0..<laneCount {
-            let lane = (startLane + offset) % laneCount
-            let activeInLane = activeBullets.filter {
-                $0.lane == lane && time >= $0.startTime && time - $0.startTime < $0.duration
-            }
-            if !moving {
-                guard !activeInLane.contains(where: { $0.placement == placement }) else { continue }
-                setNextLaneIndex(lane + 1, for: placement)
-                return lane
-            }
-
-            let opposite: Placement = placement == .scrolling ? .reverse : .scrolling
-            guard !activeInLane.contains(where: { $0.placement == opposite }) else { continue }
-            let previous = activeInLane
-                .filter { $0.placement == placement }
-                .max { $0.startTime < $1.startTime }
-            if let previous {
-                let elapsed = CGFloat(time - previous.startTime)
-                let previousRightEdge = bounds.width + previous.width - previous.speed * elapsed
-                guard DanmakuTimelinePolicy.canFollowScrollingBullet(
-                    previousRightEdge: Double(previousRightEdge),
-                    previousSpeed: Double(previous.speed),
-                    nextSpeed: Double(speed),
-                    viewportWidth: Double(bounds.width),
-                    minimumGap: 0
-                ) else { continue }
-            }
-            setNextLaneIndex(lane + 1, for: placement)
-            return lane
+        if !playbackActive, renderer.status == .play {
+            renderer.pause()
         }
-        return nil
-    }
-
-    private func nextLaneIndex(for placement: Placement) -> Int {
-        switch placement {
-        case .scrolling: return nextScrollingLane
-        case .reverse: return nextReverseLane
-        case .top: return nextTopLane
-        case .bottom: return nextBottomLane
-        }
-    }
-
-    private func setNextLaneIndex(_ index: Int, for placement: Placement) {
-        switch placement {
-        case .scrolling: nextScrollingLane = index
-        case .reverse: nextReverseLane = index
-        case .top: nextTopLane = index
-        case .bottom: nextBottomLane = index
-        }
-    }
-
-    private func resetLaneIndexes() {
-        nextScrollingLane = 0
-        nextReverseLane = 0
-        nextTopLane = 0
-        nextBottomLane = 0
-    }
-
-    private func clearActiveBullets() {
-        activeBullets.forEach { $0.label.removeFromSuperview() }
-        activeBullets.removeAll(keepingCapacity: true)
     }
 
     private func lowerBound(for time: TimeInterval) -> Int {
@@ -379,12 +251,84 @@ final class DanmakuOverlayView: UIView {
     }
 }
 
+private final class TimedDanmakuCellModel: DanmakuCellModel {
+    let cue: DanmuCue
+    let font: UIFont
+    let color: UIColor
+    let opacity: CGFloat
+    let mediaDuration: TimeInterval
+    let playbackRate: Double
+    let size: CGSize
+    var track: UInt?
+
+    var identifier: String { cue.id }
+    var cellClass: DanmakuCell.Type { TimedDanmakuCell.self }
+    var displayTime: Double { mediaDuration / playbackRate }
+    var type: DanmakuCellType {
+        switch cue.type {
+        case 4: return .bottom
+        case 5: return .top
+        default: return .floating
+        }
+    }
+
+    init(
+        cue: DanmuCue,
+        font: UIFont,
+        color: UIColor,
+        opacity: CGFloat,
+        mediaDuration: TimeInterval,
+        playbackRate: Double
+    ) {
+        self.cue = cue
+        self.font = font
+        self.color = color.withAlphaComponent(opacity)
+        self.opacity = opacity
+        self.mediaDuration = mediaDuration
+        self.playbackRate = max(0.25, playbackRate)
+        let textSize = (cue.text as NSString).size(withAttributes: [.font: font])
+        size = CGSize(width: max(24, ceil(textSize.width) + 8), height: max(24, ceil(textSize.height) + 4))
+    }
+
+    func isEqual(to cellModel: DanmakuCellModel) -> Bool {
+        identifier == cellModel.identifier
+    }
+}
+
+private final class TimedDanmakuCell: DanmakuCell {
+    required init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        displayAsync = true
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func displaying(_ context: CGContext, _ size: CGSize, _ isCancelled: Bool) {
+        guard !isCancelled, let model = model as? TimedDanmakuCellModel else { return }
+        let text = model.cue.text as NSString
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: model.font,
+            .foregroundColor: model.color
+        ]
+        context.setLineWidth(max(1, model.font.pointSize / 14))
+        context.setLineJoin(.round)
+        context.setStrokeColor(UIColor.black.withAlphaComponent(model.opacity).cgColor)
+        context.saveGState()
+        context.setTextDrawingMode(.stroke)
+        text.draw(at: CGPoint(x: 4, y: 2), withAttributes: attributes)
+        context.restoreGState()
+        context.setTextDrawingMode(.fill)
+        text.draw(at: CGPoint(x: 4, y: 2), withAttributes: attributes)
+    }
+}
+
 private extension UIColor {
-    convenience init(rgba: UInt32, alpha: CGFloat) {
-        self.init(red: CGFloat((rgba >> 16) & 0xff) / 255,
-                  green: CGFloat((rgba >> 8) & 0xff) / 255,
-                  blue: CGFloat(rgba & 0xff) / 255,
-                  alpha: alpha)
+    convenience init(rgb: UInt32) {
+        self.init(red: CGFloat((rgb >> 16) & 0xff) / 255,
+                  green: CGFloat((rgb >> 8) & 0xff) / 255,
+                  blue: CGFloat(rgb & 0xff) / 255,
+                  alpha: 1)
     }
 }
 #endif

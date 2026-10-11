@@ -18,6 +18,9 @@ packages:
   VLCKitSPM:
     url: https://github.com/tylerjonesio/vlckit-spm
     from: 3.6.0
+  DanmakuKit:
+    url: https://github.com/qyz777/DanmakuKit.git
+    exactVersion: 1.6.0
 
 targets:
   CongcongTV:
@@ -29,6 +32,8 @@ targets:
         product: KSPlayer
       - package: VLCKitSPM
         product: VLCKitSPM
+      - package: DanmakuKit
+        product: DanmakuKit
     sources:
       - path: tvbox
         excludes:

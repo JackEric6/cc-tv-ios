@@ -1,32 +1,43 @@
 import Foundation
 
 final class NetworkManager {
+    struct StringResponse {
+        let text: String
+        let finalURL: URL
+    }
+
     static let shared = NetworkManager()
     private(set) var requestCount = 0
     private(set) var requestedURLs: [String] = []
     private var responses: [String: String] = [:]
+    private var finalURLs: [String: String] = [:]
 
-    func configure(responses: [String: String]) {
+    func configure(responses: [String: String], finalURLs: [String: String] = [:]) {
         requestCount = 0
         requestedURLs = []
         self.responses = responses
+        self.finalURLs = finalURLs
     }
 
-    func getString(
+    func getStringResponse(
         from url: String,
         headers: [String: String]? = nil,
+        timeout: Int? = nil,
         maxRetries: Int = 3
-    ) async throws -> String {
+    ) async throws -> StringResponse {
         requestCount += 1
         requestedURLs.append(url)
         guard let response = responses[url] else { throw CocoaError(.fileReadUnknown) }
-        return response
+        guard let finalURL = URL(string: finalURLs[url] ?? url) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return StringResponse(text: response, finalURL: finalURL)
     }
 }
 
 @main
 struct VerifyM3U8Purifier {
-    static func main() async {
+    static func main() async throws {
         let manifest = """
         #EXTM3U
         #EXT-X-VERSION:3
@@ -404,6 +415,56 @@ struct VerifyM3U8Purifier {
                 && xiguaPrepared.removedSegmentCount == 0,
             "Xigua should keep the original master URL when generic Android rules find no ads"
         )
+
+        let redirectedMasterURL = "https://origin.example/redirect/master.m3u8?ticket=one"
+        let redirectedMasterFinalURL = "https://media.example/live/master.m3u8?session=two"
+        let redirectedVariantURL = "https://media.example/live/720p/index.m3u8?token=three"
+        let redirectedVariantFinalURL = "https://cdn.example/secure/720p/index.m3u8?token=four"
+        let redirectedMaster = """
+        #EXTM3U
+        #EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=1280x720
+        720p/index.m3u8?token=three
+        """
+        let redirectedMedia = [
+            "#EXTM3U",
+            "#EXT-X-TARGETDURATION:6",
+            "#EXTINF:6.0,",
+            "segment-1.ts",
+            "#EXT-X-CUE-OUT:DURATION=6",
+            "#EXTINF:6.0,",
+            "ads/ad-1.ts",
+            "#EXT-X-CUE-IN",
+            "#EXTINF:6.0,",
+            "segment-2.ts",
+            "#EXT-X-ENDLIST"
+        ].joined(separator: "\n")
+        NetworkManager.shared.configure(
+            responses: [
+                redirectedMasterURL: redirectedMaster,
+                redirectedVariantURL: redirectedMedia
+            ],
+            finalURLs: [
+                redirectedMasterURL: redirectedMasterFinalURL,
+                redirectedVariantURL: redirectedVariantFinalURL
+            ]
+        )
+        let redirectedPrepared = await M3U8Purifier.shared.prepare(
+            urlString: redirectedMasterURL,
+            headers: [:],
+            sourceKey: "ffzy"
+        )
+        precondition(
+            NetworkManager.shared.requestedURLs == [redirectedMasterURL, redirectedVariantURL],
+            "Relative variant must be resolved against the redirected master URL: \(NetworkManager.shared.requestedURLs)"
+        )
+        precondition(redirectedPrepared.didPurify, "Cue-marked ad segment should be removed")
+        let (proxiedData, _) = try await URLSession.shared.data(from: URL(string: redirectedPrepared.url)!)
+        let proxiedPlaylist = String(decoding: proxiedData, as: UTF8.self)
+        precondition(
+            proxiedPlaylist.contains("https://cdn.example/secure/720p/segment-1.ts"),
+            "Relative media URI must use the redirected variant URL as its base: \(proxiedPlaylist)"
+        )
+        precondition(!proxiedPlaylist.contains("ads/ad-1.ts"), "Purified playlist must not retain the ad segment")
         print("M3U8 PURIFIER AND PLAYBACK SAFETY CHECKS PASSED")
     }
 }

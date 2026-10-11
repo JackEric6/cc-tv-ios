@@ -5,13 +5,11 @@ enum PlaybackStartupFallbackPolicy {
     static let requiredProgressAdvance: TimeInterval = 1
 
     static func shouldFallback(
-        didPurify: Bool,
         elapsed: TimeInterval,
         startingProgress: TimeInterval,
         currentProgress: TimeInterval
     ) -> Bool {
-        guard didPurify,
-              elapsed.isFinite,
+        guard elapsed.isFinite,
               startingProgress.isFinite,
               currentProgress.isFinite,
               elapsed >= timeout else { return false }

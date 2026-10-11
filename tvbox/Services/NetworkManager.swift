@@ -2,6 +2,11 @@ import Foundation
 
 /// 网络请求封装 - 对应 Android 版 OkGo
 class NetworkManager {
+    struct StringResponse: Sendable {
+        let text: String
+        let finalURL: URL
+    }
+
     /// 全局共享实例。
     static let shared = NetworkManager()
 
@@ -63,6 +68,21 @@ class NetworkManager {
         timeout: Int? = nil,
         maxRetries: Int = NetworkManager.defaultMaxRetries
     ) async throws -> String {
+        return try await getStringResponse(
+            from: urlString,
+            headers: headers,
+            timeout: timeout,
+            maxRetries: maxRetries
+        ).text
+    }
+
+    /// GET 文本并返回 URLSession 跟随重定向后的最终 URL。
+    func getStringResponse(
+        from urlString: String,
+        headers: [String: String]? = nil,
+        timeout: Int? = nil,
+        maxRetries: Int = NetworkManager.defaultMaxRetries
+    ) async throws -> StringResponse {
         guard let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             throw NetworkError.invalidURL(urlString)
         }
@@ -80,7 +100,7 @@ class NetworkManager {
             throw NetworkError.decodingError("文本解码失败")
         }
 
-        return str
+        return StringResponse(text: str, finalURL: httpResponse.url ?? url)
     }
 
     /// GET 请求解码 JSON，支持自动重试。

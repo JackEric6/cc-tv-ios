@@ -5,6 +5,7 @@ enum CMSRequestHeaderPolicy {
         "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
 
     private static let referers: [String: String] = [
+        "caiji.xgzyapi.com": "https://xgzy.tv/",
         "api.ffzyapi.com": "https://ffzy5.tv/",
         "cj.ffzyapi.com": "https://ffzy5.tv/",
         "cj.lziapi.com": "https://lzizy.net/",
@@ -71,5 +72,10 @@ enum CMSRequestHeaderPolicy {
             headers[key] = value
         }
         return headers
+    }
+
+    static func sourceReferer(for sourceAPI: String) -> String? {
+        guard let host = URLComponents(string: sourceAPI)?.host?.lowercased() else { return nil }
+        return referers[host]
     }
 }

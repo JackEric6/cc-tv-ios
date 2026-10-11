@@ -36,6 +36,15 @@ struct CmsNormalizerSmokeTest {
             "player page media URL extraction failed"
         )
 
+        let redirectedPlayerPage = #"<script>var player={"url":"../media/index.m3u8?ticket=redirected"};</script>"#
+        precondition(
+            KktvsResponseNormalizer.extractMediaURL(
+                from: redirectedPlayerPage,
+                baseURL: "https://cdn.example/live/player/episode.html"
+            ) == "https://cdn.example/live/media/index.m3u8?ticket=redirected",
+            "relative media URL was not resolved against the redirected player page"
+        )
+
         let extensionlessPlaylistURL = "https://media.test/live/channel?token=abc"
         let extensionlessPlayerPage = #"<script>var player={"url":"https://media.test/live/channel?token=abc"};</script>"#
         precondition(

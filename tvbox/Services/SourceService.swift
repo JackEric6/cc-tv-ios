@@ -588,13 +588,17 @@ class SourceService {
 
         // 播放页通常是 HTML；有些资源站则用无扩展名 URL 直接返回 HLS 清单。
         // 先识别清单内容，再尝试播放器页提取，并限制跳转层数以防循环页面。
-        let body = try await getPlaybackPage(from: validURL, sourceBean: sourceBean)
-        if KktvsResponseNormalizer.isHLSPlaylist(body) {
-            return validURL
+        let response = try await getPlaybackPage(from: validURL, sourceBean: sourceBean)
+        if KktvsResponseNormalizer.isHLSPlaylist(response.text) {
+            return response.finalURL.absoluteString
         }
-        guard let extracted = KktvsResponseNormalizer.extractMediaURL(from: body, baseURL: validURL),
+        guard let extracted = KktvsResponseNormalizer.extractMediaURL(
+                from: response.text,
+                baseURL: response.finalURL.absoluteString
+              ),
               let resolvedURL = Self.validPlayableURL(extracted),
-              resolvedURL != validURL else {
+              resolvedURL != validURL,
+              resolvedURL != response.finalURL.absoluteString else {
             throw SourceError.invalidPlayableURL(validURL)
         }
         return try await resolvePlaybackPage(
@@ -914,9 +918,12 @@ class SourceService {
         return list.isEmpty
     }
 
-    private func getPlaybackPage(from url: String, sourceBean: SourceBean) async throws -> String {
+    private func getPlaybackPage(
+        from url: String,
+        sourceBean: SourceBean
+    ) async throws -> NetworkManager.StringResponse {
         let headers = playbackHeaders(for: sourceBean, mediaURL: url)
-        return try await network.getString(
+        return try await network.getStringResponse(
             from: url,
             headers: headers,
             timeout: min(max(sourceBean.timeout ?? 8, 5), 15),
@@ -925,10 +932,15 @@ class SourceService {
     }
 
     func playbackHeaders(for sourceBean: SourceBean, mediaURL: String) -> [String: String] {
-        var headers = PlaybackRequestHeaderPolicy.applyingSourceReferer(
-            to: defaultPlaybackHeaders(for: mediaURL),
-            sourceKey: sourceBean.key
-        )
+        var headers = defaultPlaybackHeaders()
+        // Android applies its CMS playback UA and source Referer to both XML
+        // and JSON CMS endpoints (type 0 and 1).
+        if PlaybackRequestHeaderPolicy.appliesToCMSPlayback(sourceType: sourceBean.type) {
+            headers = PlaybackRequestHeaderPolicy.applyingCMSPlaybackHeaders(
+                to: headers,
+                sourceKey: sourceBean.key
+            )
+        }
         if SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name) == .jianpian {
             headers["User-Agent"] = "Mozilla/5.0 packageName:com.jp3.xg3"
             headers["Referer"] = "https://fan123.hzhnl.com/"
@@ -945,26 +957,10 @@ class SourceService {
         return headers
     }
 
-    private func defaultPlaybackHeaders(for url: String) -> [String: String] {
-        var headers = [
-            "User-Agent": PlaybackRequestHeaderPolicy.androidDefaultUserAgent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/json;q=0.9"
+    private func defaultPlaybackHeaders() -> [String: String] {
+        [
+            "User-Agent": PlaybackRequestHeaderPolicy.androidDefaultUserAgent
         ]
-
-        guard let components = URLComponents(string: url),
-              let scheme = components.scheme,
-              let host = components.host,
-              !scheme.isEmpty,
-              !host.isEmpty else {
-            return headers
-        }
-
-        var origin = "\(scheme)://\(host)"
-        if let port = components.port {
-            origin += ":\(port)"
-        }
-        headers["Referer"] = origin + "/"
-        return headers
     }
 
     private func validateResponse(

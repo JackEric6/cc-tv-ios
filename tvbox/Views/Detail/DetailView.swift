@@ -247,7 +247,7 @@ struct DetailView: View {
                     },
                     onPlaybackFailed: { [playbackSessionToken] in
                         guard playbackSessionToken == self.playbackSessionToken else { return }
-                        viewModel.recoverFromPurifierPlaybackFailure()
+                        viewModel.recoverFromPlaybackFailure()
                     },
                     onToggleFullScreen: inlineFullScreenHandler,
                     onBack: { dismiss() },

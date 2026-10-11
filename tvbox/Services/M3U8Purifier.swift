@@ -70,26 +70,28 @@ actor M3U8Purifier {
         }
 
         do {
-            let firstContent = Self.normalizeManifest(try await network.getString(
+            let firstResponse = try await network.getStringResponse(
                 from: url.absoluteString,
                 headers: headers.isEmpty ? nil : headers,
                 maxRetries: 1
-            ))
+            )
+            let firstContent = Self.normalizeManifest(firstResponse.text)
             guard firstContent.hasPrefix("#EXTM3U") else {
                 return PreparedURL(url: urlString, didPurify: false, removedSegmentCount: 0)
             }
 
             let targetURL: URL
             let content: String
-            if let variant = M3U8ManifestParser.firstVariantURL(in: firstContent, baseURL: url) {
-                targetURL = variant
-                content = Self.normalizeManifest(try await network.getString(
+            if let variant = M3U8ManifestParser.firstVariantURL(in: firstContent, baseURL: firstResponse.finalURL) {
+                let variantResponse = try await network.getStringResponse(
                     from: variant.absoluteString,
                     headers: headers.isEmpty ? nil : headers,
                     maxRetries: 1
-                ))
+                )
+                targetURL = variantResponse.finalURL
+                content = Self.normalizeManifest(variantResponse.text)
             } else {
-                targetURL = url
+                targetURL = firstResponse.finalURL
                 content = firstContent
             }
 

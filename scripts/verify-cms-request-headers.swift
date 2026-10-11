@@ -8,6 +8,9 @@ struct VerifyCMSRequestHeaders {
             configured: nil
         )
         precondition(ffzy["Referer"] == "https://ffzy5.tv/")
+        precondition(CMSRequestHeaderPolicy.sourceReferer(
+            for: "https://caiji.xgzyapi.com/api.php/provide/vod/"
+        ) == "https://xgzy.tv/")
         precondition(ffzy["User-Agent"] == CMSRequestHeaderPolicy.androidUserAgent)
         precondition(ffzy["Accept"] == "application/json,text/plain,*/*")
 

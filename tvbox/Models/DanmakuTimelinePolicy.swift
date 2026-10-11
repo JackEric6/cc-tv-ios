@@ -23,6 +23,19 @@ enum DanmakuTimelinePolicy {
         return currentTime < previousTime - max(0, tolerance)
     }
 
+    static func didSeek(
+        from expectedTime: TimeInterval?,
+        to currentTime: TimeInterval,
+        tolerance: TimeInterval = 1
+    ) -> Bool {
+        guard let expectedTime,
+              expectedTime.isFinite,
+              currentTime.isFinite,
+              expectedTime >= 0,
+              currentTime >= 0 else { return false }
+        return abs(currentTime - expectedTime) > max(0, tolerance)
+    }
+
     static func shouldDisplayCue(age: TimeInterval, duration: TimeInterval) -> Bool {
         age.isFinite && duration.isFinite && age >= 0 && age <= duration
     }
