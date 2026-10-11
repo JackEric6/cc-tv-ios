@@ -242,10 +242,9 @@ final class DanmakuOverlayView: UIView {
         let textLayer = CATextLayer()
         textLayer.contentsScale = UIScreen.main.scale
         textLayer.alignmentMode = .center
-        textLayer.verticalAlignmentMode = .center
         textLayer.isWrapped = false
         textLayer.truncationMode = .none
-        textLayer.bounds = CGRect(x: 0, y: 0, width: cueWidth, height: laneHeight)
+        textLayer.bounds = CGRect(x: 0, y: 0, width: cueWidth, height: ceil(font.lineHeight))
         textLayer.position = CGPoint(
             x: bounds.width + cueWidth / 2,
             y: (CGFloat(lane) + 0.5) * laneHeight
