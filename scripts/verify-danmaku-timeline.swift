@@ -3,6 +3,24 @@ import Foundation
 @main
 struct VerifyDanmakuTimeline {
     static func main() {
+        precondition(!DanmakuTimelinePolicy.hasUsableRendererLayout(
+            viewportWidth: 0,
+            viewportHeight: 0,
+            rendererWidth: 0,
+            rendererHeight: 0
+        ))
+        precondition(!DanmakuTimelinePolicy.hasUsableRendererLayout(
+            viewportWidth: 390,
+            viewportHeight: 844,
+            rendererWidth: 390,
+            rendererHeight: 0
+        ))
+        precondition(DanmakuTimelinePolicy.hasUsableRendererLayout(
+            viewportWidth: 390,
+            viewportHeight: 844,
+            rendererWidth: 390,
+            rendererHeight: 132
+        ))
         precondition(DanmakuTimelinePolicy.trackHeight(viewportHeight: 390) == 44)
         precondition(DanmakuTimelinePolicy.trackRegionHeight(
             viewportHeight: 390,

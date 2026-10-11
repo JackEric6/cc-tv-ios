@@ -1,6 +1,16 @@
 import Foundation
 
 enum DanmakuTimelinePolicy {
+    static func hasUsableRendererLayout(
+        viewportWidth: Double,
+        viewportHeight: Double,
+        rendererWidth: Double,
+        rendererHeight: Double
+    ) -> Bool {
+        [viewportWidth, viewportHeight, rendererWidth, rendererHeight]
+            .allSatisfy { $0.isFinite && $0 > 0 }
+    }
+
     static func trackHeight(viewportHeight: Double) -> Double {
         guard viewportHeight.isFinite, viewportHeight > 0 else { return 0 }
         return min(viewportHeight, 44)

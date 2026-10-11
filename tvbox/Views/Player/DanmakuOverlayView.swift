@@ -16,6 +16,7 @@ final class DanmakuOverlayView: UIView {
     private var hasTimeAnchor = false
     private var playbackActive = true
     private var lastLayoutSize = CGSize.zero
+    private var rendererLayoutIsReady = false
     private var settings = DanmakuDisplaySettings()
 
     private let fixedDuration: TimeInterval = 5
@@ -50,7 +51,6 @@ final class DanmakuOverlayView: UIView {
             renderer.topAnchor.constraint(equalTo: topAnchor),
             rendererHeightConstraint
         ])
-        applyTrackSettings()
     }
 
     deinit {
@@ -66,14 +66,18 @@ final class DanmakuOverlayView: UIView {
     func updateSettings(_ settings: DanmakuDisplaySettings) {
         let now = currentTimelineTime()
         self.settings = settings.normalized
+        rendererLayoutIsReady = false
         applyTrackSettings()
         setNeedsLayout()
         layoutIfNeeded()
-        renderer.layoutIfNeeded()
-        renderer.recalculateTracks()
-        renderer.clean()
+        applyTrackSettings()
+        if rendererLayoutIsReady {
+            renderer.clean()
+        }
         nextCueIndex = lowerBound(for: max(0, now - max(fixedDuration, self.settings.scrollDuration)))
-        render(at: now)
+        if rendererLayoutIsReady {
+            render(at: now)
+        }
     }
 
     func setPlaybackActive(_ active: Bool) {
@@ -152,27 +156,57 @@ final class DanmakuOverlayView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        guard bounds.size != lastLayoutSize else { return }
-        lastLayoutSize = bounds.size
+        let layoutChanged = bounds.size != lastLayoutSize
+        if layoutChanged {
+            lastLayoutSize = bounds.size
+            rendererLayoutIsReady = false
+        }
+        guard layoutChanged || !rendererLayoutIsReady else { return }
         applyTrackSettings()
-        renderer.layoutIfNeeded()
-        renderer.recalculateTracks()
-        guard hasTimeAnchor, !cues.isEmpty else { return }
+        guard rendererLayoutIsReady, hasTimeAnchor, !cues.isEmpty else { return }
         render(at: currentTimelineTime())
     }
 
     private func applyTrackSettings() {
+        guard bounds.width.isFinite, bounds.height.isFinite,
+              bounds.width > 0, bounds.height > 0 else {
+            rendererLayoutIsReady = false
+            return
+        }
+
         let rowCount = max(1, settings.rowCount)
-        let trackHeight = DanmakuTimelinePolicy.trackHeight(viewportHeight: Double(bounds.height))
-        renderer.trackHeight = CGFloat(trackHeight)
-        rendererHeightConstraint.constant = CGFloat(
-            DanmakuTimelinePolicy.trackRegionHeight(
-                viewportHeight: Double(bounds.height),
-                rowCount: rowCount,
-                trackHeight: trackHeight
-            )
+        let viewportWidth = Double(bounds.width)
+        let viewportHeight = Double(bounds.height)
+        let trackHeight = DanmakuTimelinePolicy.trackHeight(viewportHeight: viewportHeight)
+        let regionHeight = DanmakuTimelinePolicy.trackRegionHeight(
+            viewportHeight: viewportHeight,
+            rowCount: rowCount,
+            trackHeight: trackHeight
         )
+
+        guard trackHeight.isFinite, trackHeight > 0,
+              regionHeight.isFinite, regionHeight > 0 else {
+            rendererLayoutIsReady = false
+            return
+        }
+
+        rendererHeightConstraint.constant = CGFloat(regionHeight)
+        guard DanmakuTimelinePolicy.hasUsableRendererLayout(
+            viewportWidth: viewportWidth,
+            viewportHeight: viewportHeight,
+            rendererWidth: Double(renderer.bounds.width),
+            rendererHeight: Double(renderer.bounds.height)
+        ) else {
+            rendererLayoutIsReady = false
+            setNeedsLayout()
+            return
+        }
+
+        renderer.trackHeight = CGFloat(trackHeight)
         renderer.displayArea = 1
+        renderer.layoutIfNeeded()
+        renderer.recalculateTracks()
+        rendererLayoutIsReady = true
     }
 
     private func startDisplayLinkIfNeeded() {
@@ -200,7 +234,8 @@ final class DanmakuOverlayView: UIView {
     }
 
     private func render(at time: TimeInterval) {
-        guard bounds.width > 0, bounds.height > 0 else { return }
+        guard rendererLayoutIsReady,
+              bounds.width > 0, bounds.height > 0 else { return }
         ensureRendererPlaying()
 
         var emitted = 0
@@ -246,6 +281,7 @@ final class DanmakuOverlayView: UIView {
     }
 
     private func ensureRendererPlaying() {
+        guard rendererLayoutIsReady else { return }
         if renderer.status != .play {
             renderer.play()
         }
