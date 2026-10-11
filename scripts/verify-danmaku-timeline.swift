@@ -21,17 +21,18 @@ struct VerifyDanmakuTimeline {
             rendererWidth: 390,
             rendererHeight: 132
         ))
-        precondition(DanmakuTimelinePolicy.trackHeight(viewportHeight: 390) == 44)
+        precondition(DanmakuTimelinePolicy.trackHeight(viewportHeight: 390) == 28)
         precondition(DanmakuTimelinePolicy.trackRegionHeight(
             viewportHeight: 390,
             rowCount: 3,
-            trackHeight: 44
-        ) == 132)
+            trackHeight: 28
+        ) == 84)
         precondition(DanmakuTimelinePolicy.trackRegionHeight(
             viewportHeight: 90,
             rowCount: 3,
-            trackHeight: 44
+            trackHeight: 28
         ) == 90)
+        precondition(DanmakuTimelinePolicy.trackHeight(viewportHeight: 390, sizeScale: 1.6) == 48)
         precondition(DanmakuTimelinePolicy.isPlaybackActive(isPlaying: true))
         precondition(!DanmakuTimelinePolicy.isPlaybackActive(isPlaying: false))
         precondition(DanmakuTimelinePolicy.shouldDisplayCue(age: 2, duration: 8))

@@ -966,13 +966,11 @@ class SourceService {
         refererOverride: String? = nil
     ) -> [String: String] {
         var headers = defaultPlaybackHeaders()
-        // Android applies its CMS playback UA and source Referer to both XML
-        // and JSON CMS endpoints (type 0 and 1).
+        // Match Android's playback request defaults for XML and JSON CMS sources.
         if PlaybackRequestHeaderPolicy.appliesToCMSPlayback(sourceType: sourceBean.type) {
             headers = PlaybackRequestHeaderPolicy.applyingCMSPlaybackHeaders(
                 to: headers,
-                sourceKey: sourceBean.key,
-                sourceAPI: sourceBean.api
+                sourceKey: sourceBean.key
             )
         }
         if SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name) == .jianpian {

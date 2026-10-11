@@ -13,17 +13,15 @@ struct VerifyPlaybackRequestHeaders {
 
         let heavenHeaders = PlaybackRequestHeaderPolicy.applyingCMSPlaybackHeaders(
             to: ["User-Agent": PlaybackRequestHeaderPolicy.androidDefaultUserAgent],
-            sourceKey: "dyttzy",
-            sourceAPI: "https://caiji.dyttzyapi.com/api.php/provide/vod/"
+            sourceKey: "dyttzy"
         )
-        precondition(heavenHeaders["Referer"] == "https://dyttzy.tv/")
+        precondition(heavenHeaders["Referer"] == nil)
 
         let xintongHeaders = PlaybackRequestHeaderPolicy.applyingCMSPlaybackHeaders(
             to: ["User-Agent": PlaybackRequestHeaderPolicy.androidDefaultUserAgent],
-            sourceKey: "fhw88",
-            sourceAPI: "https://cj.ffzyapi.com/api.php/provide/vod/"
+            sourceKey: "fhw88"
         )
-        precondition(xintongHeaders["Referer"] == "https://ffzy5.tv/")
+        precondition(xintongHeaders["Referer"] == nil)
 
         let sharedPageHeaders = PlaybackRequestHeaderPolicy.applyingRefererOverride(
             "https://vip.ffzy-plays.com/share/303d834ae7ba59a8233f9b0bd60998fe",
@@ -38,6 +36,11 @@ struct VerifyPlaybackRequestHeaders {
         )
         precondition(xiguaHeaders["Referer"] == nil)
         precondition(xiguaHeaders["User-Agent"] == PlaybackRequestHeaderPolicy.androidCMSPlaybackUserAgent)
+
+        let xiguaCatalogReferer = CMSRequestHeaderPolicy.sourceReferer(
+            for: "https://caiji.xgzyapi.com/api.php/provide/vod/"
+        )
+        precondition(xiguaCatalogReferer == "https://xgzy.tv/")
 
         let otherHeaders = ["User-Agent": PlaybackRequestHeaderPolicy.androidDefaultUserAgent]
         let fallbackCMSHeaders = PlaybackRequestHeaderPolicy.applyingCMSPlaybackHeaders(

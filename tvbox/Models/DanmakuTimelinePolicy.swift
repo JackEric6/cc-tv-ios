@@ -11,9 +11,10 @@ enum DanmakuTimelinePolicy {
             .allSatisfy { $0.isFinite && $0 > 0 }
     }
 
-    static func trackHeight(viewportHeight: Double) -> Double {
+    static func trackHeight(viewportHeight: Double, sizeScale: Double = 0.8) -> Double {
         guard viewportHeight.isFinite, viewportHeight > 0 else { return 0 }
-        return min(viewportHeight, 44)
+        let normalizedScale = sizeScale.isFinite ? min(max(sizeScale, 0.1), 1.6) : 0.8
+        return min(viewportHeight, max(28, 25 * normalizedScale + 8))
     }
 
     static func trackRegionHeight(

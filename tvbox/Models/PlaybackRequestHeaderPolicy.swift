@@ -3,10 +3,6 @@ import Foundation
 enum PlaybackRequestHeaderPolicy {
     private static let cmsSourceReferers: [String: String] = [
         "ffzy": "https://ffzy5.tv/",
-        "fhw88": "https://ffzy5.tv/",
-        "xintong": "https://ffzy5.tv/",
-        "dyttzy": "https://dyttzy.tv/",
-        "tiantang": "https://dyttzy.tv/",
         "lzi": "https://lzizy.net/",
         "sony": "https://suonizy.net/",
         "hongniu": "https://hongniuzy.com/",
@@ -56,8 +52,7 @@ enum PlaybackRequestHeaderPolicy {
 
     static func applyingCMSPlaybackHeaders(
         to headers: [String: String],
-        sourceKey: String,
-        sourceAPI: String? = nil
+        sourceKey: String
     ) -> [String: String] {
         let key = sourceKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var result = headers
@@ -66,8 +61,9 @@ enum PlaybackRequestHeaderPolicy {
         result.keys.filter { $0.caseInsensitiveCompare("User-Agent") == .orderedSame }
             .forEach { result.removeValue(forKey: $0) }
         result["User-Agent"] = androidCMSPlaybackUserAgent
-        if let referer = sourceAPI.flatMap(CMSRequestHeaderPolicy.sourceReferer(for:))
-            ?? cmsSourceReferers[key] {
+        // Match Android playback headers: CMS endpoint Referer mappings belong
+        // to catalog requests and must not be copied to media CDN requests.
+        if let referer = cmsSourceReferers[key] {
             result["Referer"] = referer
         }
         return result

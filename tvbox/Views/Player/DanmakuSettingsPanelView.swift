@@ -38,7 +38,7 @@ struct DanmakuDisplaySettings: Codable, Equatable {
     }
 
     var sizeScale: CGFloat {
-        CGFloat(normalized.sizeLevel) / 8
+        CGFloat(normalized.sizeLevel) / 10
     }
 }
 

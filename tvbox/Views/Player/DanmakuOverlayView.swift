@@ -177,7 +177,10 @@ final class DanmakuOverlayView: UIView {
         let rowCount = max(1, settings.rowCount)
         let viewportWidth = Double(bounds.width)
         let viewportHeight = Double(bounds.height)
-        let trackHeight = DanmakuTimelinePolicy.trackHeight(viewportHeight: viewportHeight)
+        let trackHeight = DanmakuTimelinePolicy.trackHeight(
+            viewportHeight: viewportHeight,
+            sizeScale: Double(settings.sizeScale)
+        )
         let regionHeight = DanmakuTimelinePolicy.trackRegionHeight(
             viewportHeight: viewportHeight,
             rowCount: rowCount,
@@ -191,6 +194,8 @@ final class DanmakuOverlayView: UIView {
         }
 
         rendererHeightConstraint.constant = CGFloat(regionHeight)
+        renderer.setNeedsLayout()
+        renderer.layoutIfNeeded()
         guard DanmakuTimelinePolicy.hasUsableRendererLayout(
             viewportWidth: viewportWidth,
             viewportHeight: viewportHeight,
@@ -202,10 +207,9 @@ final class DanmakuOverlayView: UIView {
             return
         }
 
-        renderer.trackHeight = CGFloat(trackHeight)
         renderer.displayArea = 1
+        renderer.trackHeight = CGFloat(trackHeight)
         renderer.layoutIfNeeded()
-        renderer.recalculateTracks()
         rendererLayoutIsReady = true
     }
 
@@ -362,7 +366,7 @@ private final class TimedDanmakuCell: DanmakuCell {
             .font: model.font,
             .foregroundColor: model.color
         ]
-        context.setLineWidth(max(1, model.font.pointSize / 14))
+        context.setLineWidth(max(0.65, model.font.pointSize * 0.04))
         context.setLineJoin(.round)
         context.setStrokeColor(UIColor.black.withAlphaComponent(model.opacity).cgColor)
         context.saveGState()
