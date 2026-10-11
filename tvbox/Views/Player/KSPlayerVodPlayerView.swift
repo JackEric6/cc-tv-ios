@@ -1548,6 +1548,9 @@ private struct KSPlayerUIView: UIViewRepresentable {
         private weak var danmakuView: DanmakuOverlayView?
         private weak var danmakuStatusLabel: UILabel?
         private var danmakuStatusDismissWorkItem: DispatchWorkItem?
+        private var danmakuRetryWorkItem: DispatchWorkItem?
+        private var danmakuRetryKey: String?
+        private var danmakuRetryAttempt = 0
         private var danmakuSettingsPanel: DanmakuSettingsPanelView?
         private var danmakuSearchPanel: DanmakuSearchPanelView?
         private var danmakuTask: Task<Void, Never>?
@@ -1646,6 +1649,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             danmakuEpisode = normalizedEpisode
             playerView?.titleLabel.text = normalizedTitle
             loadedDanmakuKey = nil
+            cancelDanmakuRetry(resetAttempts: true)
             invalidateDanmakuLoad()
             danmakuSearchTask?.cancel()
             danmakuResultTask?.cancel()
@@ -1668,6 +1672,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             updateDanmakuButton()
             updateDanmakuPanel()
             if !enabled {
+                cancelDanmakuRetry(resetAttempts: true)
                 invalidateDanmakuLoad()
                 danmakuSearchTask?.cancel()
                 danmakuResultTask?.cancel()
@@ -1740,6 +1745,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             danmakuResultTask?.cancel()
             danmakuResultTask = nil
             danmakuStatusDismissWorkItem?.cancel()
+            cancelDanmakuRetry(resetAttempts: true)
             danmakuSettingsPanel?.removeFromSuperview()
             danmakuSettingsPanel = nil
             danmakuSearchPanel?.removeFromSuperview()
@@ -1768,6 +1774,13 @@ private struct KSPlayerUIView: UIViewRepresentable {
             }
             let key = "\(title)\u{1F}\(episode)"
             guard loadedDanmakuKey != key, loadingDanmakuKey != key else { return }
+            if danmakuRetryKey == key, danmakuRetryWorkItem != nil { return }
+            if danmakuRetryKey != key {
+                cancelDanmakuRetry(resetAttempts: true)
+                danmakuRetryKey = key
+            }
+            danmakuRetryWorkItem?.cancel()
+            danmakuRetryWorkItem = nil
 
             invalidateDanmakuLoad()
             let requestID = UUID()
@@ -1788,10 +1801,12 @@ private struct KSPlayerUIView: UIViewRepresentable {
                     self.loadingDanmakuKey = nil
                     self.danmakuTask = nil
                     if !cues.isEmpty {
+                        self.cancelDanmakuRetry(resetAttempts: true)
                         self.loadedDanmakuKey = key
                         self.setDanmakuStatus("已加载 \(cues.count) 条弹幕")
                     } else {
-                        self.setDanmakuStatus("未找到匹配弹幕")
+                        self.setDanmakuStatus("暂未获取到弹幕，稍后重试")
+                        self.scheduleDanmakuRetry(for: key, requestID: requestID, overlay: overlay)
                     }
                     overlay.setCues(cues)
                     overlay.isHidden = !self.danmakuEnabled || cues.isEmpty
@@ -1809,6 +1824,37 @@ private struct KSPlayerUIView: UIViewRepresentable {
             danmakuTask?.cancel()
             danmakuTask = nil
             loadingDanmakuKey = nil
+        }
+
+        private func scheduleDanmakuRetry(
+            for key: String,
+            requestID: UUID,
+            overlay: DanmakuOverlayView
+        ) {
+            guard danmakuRetryAttempt < 2 else { return }
+            let delay: TimeInterval = danmakuRetryAttempt == 0 ? 2 : 5
+            danmakuRetryAttempt += 1
+            let workItem = DispatchWorkItem { [weak self, weak overlay] in
+                guard let self, let overlay,
+                      self.danmakuEnabled,
+                      self.danmakuLoadRequestID == requestID,
+                      self.danmakuRetryKey == key,
+                      self.danmakuView === overlay else { return }
+                self.danmakuRetryWorkItem = nil
+                self.setDanmakuStatus("正在重试弹幕加载")
+                self.loadDanmaku(into: overlay)
+            }
+            danmakuRetryWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        }
+
+        private func cancelDanmakuRetry(resetAttempts: Bool) {
+            danmakuRetryWorkItem?.cancel()
+            danmakuRetryWorkItem = nil
+            if resetAttempts {
+                danmakuRetryKey = nil
+                danmakuRetryAttempt = 0
+            }
         }
 
         private func installDanmakuStatus(in view: IOSVideoPlayerView) {
@@ -1872,6 +1918,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
                 return
             }
             loadedDanmakuKey = nil
+            cancelDanmakuRetry(resetAttempts: true)
             invalidateDanmakuLoad()
             guard let danmakuView else {
                 setDanmakuStatus("播放器尚未就绪")
@@ -1885,6 +1932,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
                 setDanmakuStatus("请先开启弹幕")
                 return
             }
+            cancelDanmakuRetry(resetAttempts: true)
             invalidateDanmakuLoad()
             danmakuSettingsPanel?.removeFromSuperview()
             danmakuSettingsPanel = nil
@@ -1966,10 +2014,12 @@ private struct KSPlayerUIView: UIViewRepresentable {
                   let overlay = danmakuView else { return }
             danmakuSearchTask?.cancel()
             danmakuResultTask?.cancel()
+            cancelDanmakuRetry(resetAttempts: true)
             invalidateDanmakuLoad()
             overlay.clear()
             let requestID = UUID()
             danmakuResultRequestID = requestID
+            let requestedTitle = danmakuTitle
             let requestedEpisode = danmakuEpisode
             let matchingIndices = danmakuSearchResults.indices.filter {
                 DanmakuEpisodeMatcher.matches(
@@ -2000,7 +2050,11 @@ private struct KSPlayerUIView: UIViewRepresentable {
                         )
                     }
                     do {
-                        let cues = try await DanmuService.shared.loadSearchResult(result)
+                        let cues = try await DanmuService.shared.loadSearchResult(
+                            result,
+                            title: requestedTitle,
+                            episode: requestedEpisode
+                        )
                         guard !Task.isCancelled, self.danmakuResultRequestID == requestID else { return }
                         guard !cues.isEmpty else { continue }
                         overlay.setCues(cues)

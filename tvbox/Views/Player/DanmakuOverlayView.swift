@@ -104,7 +104,7 @@ final class DanmakuOverlayView: UIView {
         synchronizeTimelineLayer()
 
         if didSeek {
-            clearActiveCues()
+            removeInactiveCues(afterSeekTo: boundedTime)
             nextCueIndex = lowerBound(for: max(0, boundedTime - activeDisplayWindow))
         }
 
@@ -212,6 +212,7 @@ final class DanmakuOverlayView: UIView {
     }
 
     private func place(_ cue: DanmuCue, startTime: TimeInterval, at time: TimeInterval, duration: TimeInterval) {
+        guard activeCues[cue.id] == nil else { return }
         let size = max(12, min(36, CGFloat(cue.size) * settings.sizeScale))
         let font = UIFont.systemFont(ofSize: size, weight: settings.fontWeight)
         let textWidth = (cue.text as NSString).size(withAttributes: [.font: font]).width
@@ -273,6 +274,20 @@ final class DanmakuOverlayView: UIView {
     private func removeExpiredCues(at time: TimeInterval) {
         let expired = activeCues.values.filter { time - $0.trajectory.startTime > $0.trajectory.duration }
         for active in expired {
+            active.layer.removeFromSuperlayer()
+            activeCues.removeValue(forKey: active.cue.id)
+        }
+    }
+
+    private func removeInactiveCues(afterSeekTo time: TimeInterval) {
+        let inactive = activeCues.values.filter {
+            !DanmakuTimelinePolicy.shouldRetainCueAfterSeek(
+                startTime: $0.trajectory.startTime,
+                currentTime: time,
+                duration: $0.trajectory.duration
+            )
+        }
+        for active in inactive {
             active.layer.removeFromSuperlayer()
             activeCues.removeValue(forKey: active.cue.id)
         }

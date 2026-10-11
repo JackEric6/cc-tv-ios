@@ -138,6 +138,16 @@ jobs:
             -o /tmp/verify-danmaku-episode-matcher
           /tmp/verify-danmaku-episode-matcher
 
+      - name: Verify cross-source danmaku cache
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/DanmuCue.swift \
+            tvbox/Models/DanmakuCacheKey.swift \
+            tvbox/Services/DanmakuLocalCache.swift \
+            scripts/verify-danmaku-local-cache.swift \
+            -o /tmp/verify-danmaku-local-cache
+          /tmp/verify-danmaku-local-cache
+
       - name: Verify danmaku API fallback selection
         run: |
           swiftc -parse-as-library \

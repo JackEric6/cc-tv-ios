@@ -93,6 +93,14 @@ enum DanmakuTimelinePolicy {
         age.isFinite && duration.isFinite && age >= 0 && age <= duration
     }
 
+    static func shouldRetainCueAfterSeek(
+        startTime: TimeInterval,
+        currentTime: TimeInterval,
+        duration: TimeInterval
+    ) -> Bool {
+        shouldDisplayCue(age: currentTime - startTime, duration: duration)
+    }
+
     /// Scrolling cells travel one viewport plus their own width. Scaling their
     /// lifetime by that distance keeps their pixel speed independent of text length.
     static func scrollingDuration(
