@@ -19,6 +19,7 @@ final class DanmakuOverlayView: UIView {
     private var rendererLayoutIsReady = false
     private var settings = DanmakuDisplaySettings()
 
+    private let minimumActiveWindow: TimeInterval = 5
     private let maxCuesPerFrame = 40
 
     override init(frame: CGRect) {
@@ -79,7 +80,7 @@ final class DanmakuOverlayView: UIView {
         if rendererLayoutIsReady {
             renderer.clean()
         }
-        nextCueIndex = lowerBound(for: max(0, now - max(fixedDuration, self.settings.scrollDuration)))
+        nextCueIndex = lowerBound(for: max(0, now - activeDisplayWindow))
         if rendererLayoutIsReady {
             render(at: now)
         }
@@ -121,11 +122,10 @@ final class DanmakuOverlayView: UIView {
 
         if !hadTimeAnchor || didSeek {
             renderer.clean()
-            let activeWindow = max(fixedDuration, settings.scrollDuration)
-            nextCueIndex = lowerBound(for: max(0, boundedTime - activeWindow))
+            nextCueIndex = lowerBound(for: max(0, boundedTime - activeDisplayWindow))
         } else if rateChanged {
             renderer.clean()
-            nextCueIndex = lowerBound(for: max(0, boundedTime - max(fixedDuration, settings.scrollDuration)))
+            nextCueIndex = lowerBound(for: max(0, boundedTime - activeDisplayWindow))
         }
 
         if window != nil, !cues.isEmpty {
@@ -288,6 +288,10 @@ final class DanmakuOverlayView: UIView {
             viewportWidth: Double(bounds.width),
             cueWidth: Double(cueWidth)
         )
+    }
+
+    private var activeDisplayWindow: TimeInterval {
+        max(minimumActiveWindow, cues.map { displayDuration(for: $0) }.max() ?? settings.scrollDuration)
     }
 
     private func displayColor(for cue: DanmuCue) -> UIColor {
