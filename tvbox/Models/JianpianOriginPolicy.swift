@@ -11,6 +11,10 @@ enum JianpianOriginPolicy {
         "https://hodpj.cc"
     ]
 
+    static func fallbackCandidates(preferred: String) -> [String] {
+        Array(candidates(preferred: preferred, discoveredServers: "").dropFirst())
+    }
+
     static func candidates(preferred: String, discoveredServers: String) -> [String] {
         var result: [String] = []
         var seen = Set<String>()

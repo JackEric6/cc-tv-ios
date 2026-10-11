@@ -1,5 +1,27 @@
 import Foundation
 
+struct DanmakuScrollTrajectory: Equatable {
+    let startTime: TimeInterval
+    let duration: TimeInterval
+    let width: Double
+
+    func speed(viewportWidth: Double) -> Double? {
+        guard duration.isFinite, duration > 0, width.isFinite, width >= 0,
+              viewportWidth.isFinite, viewportWidth > 0 else { return nil }
+        return (viewportWidth + width) / duration
+    }
+
+    func position(at time: TimeInterval, viewportWidth: Double) -> CGRect? {
+        guard time.isFinite, startTime.isFinite, duration.isFinite, duration > 0,
+              viewportWidth.isFinite, viewportWidth > 0, width.isFinite, width >= 0 else {
+            return nil
+        }
+        let progress = min(max((time - startTime) / duration, 0), 1)
+        let left = viewportWidth - (viewportWidth + width) * progress
+        return CGRect(x: CGFloat(left), y: 0, width: CGFloat(width), height: 0)
+    }
+}
+
 enum DanmakuTimelinePolicy {
     static func hasUsableRendererLayout(
         viewportWidth: Double,
@@ -100,5 +122,35 @@ enum DanmakuTimelinePolicy {
         let catchUpTime = (viewportWidth - previousRightEdge) / (nextSpeed - previousSpeed)
         let previousExitTime = previousRightEdge / previousSpeed
         return catchUpTime >= previousExitTime
+    }
+
+    static func canPlace(
+        _ candidate: DanmakuScrollTrajectory,
+        with existing: [DanmakuScrollTrajectory],
+        at time: TimeInterval,
+        viewportWidth: Double,
+        minimumGap: Double
+    ) -> Bool {
+        guard let candidatePosition = candidate.position(at: time, viewportWidth: viewportWidth),
+              let candidateSpeed = candidate.speed(viewportWidth: viewportWidth),
+              candidateSpeed > 0 else { return false }
+
+        for previous in existing {
+            guard let previousPosition = previous.position(at: time, viewportWidth: viewportWidth),
+                  let previousSpeed = previous.speed(viewportWidth: viewportWidth),
+                  previousSpeed > 0,
+                  previousPosition.maxX > 0 else { continue }
+
+            let gap = Double(candidatePosition.minX - previousPosition.maxX)
+            guard gap >= max(0, minimumGap) else { return false }
+
+            if candidateSpeed > previousSpeed {
+                let catchUpTime = gap / (candidateSpeed - previousSpeed)
+                let previousExitTime = max(0, Double(previousPosition.maxX)) / previousSpeed
+                if catchUpTime < previousExitTime { return false }
+            }
+        }
+
+        return true
     }
 }

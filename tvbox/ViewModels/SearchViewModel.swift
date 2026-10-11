@@ -79,6 +79,10 @@ class SearchViewModel: ObservableObject {
     func search() async {
         let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        guard ApiConfig.shared.isLoaded else {
+            errorMessage = "影视源配置仍在加载，请稍后重试"
+            return
+        }
 
         clearSearchSuggestions()
 

@@ -83,6 +83,34 @@ struct VerifyDanmakuTimeline {
             viewportWidth: 1000,
             minimumGap: 0
         ))
+        let slowCue = DanmakuScrollTrajectory(startTime: 0, duration: 10, width: 100)
+        let fasterCue = DanmakuScrollTrajectory(startTime: 2, duration: 5, width: 20)
+        precondition(!DanmakuTimelinePolicy.canPlace(
+            fasterCue,
+            with: [slowCue],
+            at: 2,
+            viewportWidth: 1000,
+            minimumGap: 18
+        ))
+        let laterFastCue = DanmakuScrollTrajectory(startTime: 8.5, duration: 3, width: 20)
+        precondition(DanmakuTimelinePolicy.canPlace(
+            laterFastCue,
+            with: [slowCue],
+            at: 8.5,
+            viewportWidth: 1000,
+            minimumGap: 18
+        ))
+        let shortCueDuration = DanmakuTimelinePolicy.scrollingDuration(
+            baseDuration: 8,
+            viewportWidth: 1000,
+            cueWidth: 40
+        )
+        let longCueDuration = DanmakuTimelinePolicy.scrollingDuration(
+            baseDuration: 8,
+            viewportWidth: 1000,
+            cueWidth: 400
+        )
+        precondition(abs((1000 + 40) / shortCueDuration - (1000 + 400) / longCueDuration) < 0.0001)
         print("DANMAKU TIMELINE CHECKS PASSED")
     }
 }

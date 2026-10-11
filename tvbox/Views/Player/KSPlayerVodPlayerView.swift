@@ -1695,7 +1695,18 @@ private struct KSPlayerUIView: UIViewRepresentable {
 
         func installDanmaku(on view: IOSVideoPlayerView) {
             installDanmakuStatus(in: view)
-            if let existing = danmakuView, existing.superview === view.contentOverlayView {
+            if let existing = danmakuView {
+                if existing.superview !== view.contentOverlayView {
+                    existing.removeFromSuperview()
+                    view.contentOverlayView.addSubview(existing)
+                    existing.translatesAutoresizingMaskIntoConstraints = false
+                    NSLayoutConstraint.activate([
+                        existing.leadingAnchor.constraint(equalTo: view.contentOverlayView.leadingAnchor),
+                        existing.trailingAnchor.constraint(equalTo: view.contentOverlayView.trailingAnchor),
+                        existing.topAnchor.constraint(equalTo: view.contentOverlayView.topAnchor),
+                        existing.bottomAnchor.constraint(equalTo: view.contentOverlayView.bottomAnchor)
+                    ])
+                }
                 existing.isHidden = !danmakuEnabled
                 existing.updateSettings(danmakuSettings)
                 loadDanmaku(into: existing)
@@ -1799,6 +1810,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
 
         private func installDanmakuStatus(in view: IOSVideoPlayerView) {
             if let danmakuStatusLabel, danmakuStatusLabel.superview === view.contentOverlayView { return }
+            danmakuStatusLabel?.removeFromSuperview()
             let label = UILabel()
             label.translatesAutoresizingMaskIntoConstraints = false
             label.textAlignment = .center
@@ -2045,13 +2057,13 @@ private struct KSPlayerUIView: UIViewRepresentable {
             playerView = view
             view.titleLabel.text = danmakuTitle
             view.titleLabel.textColor = .white
-            configureButton(previousButton, imageName: "backward.end.fill", label: "上一集", action: #selector(previousPressed))
+            configureButton(previousButton, imageName: "backward.end", label: "上一集", action: #selector(previousPressed), weight: .light)
             configureButton(rewindButton, imageName: "gobackward.15", label: "后退15秒", action: #selector(rewindPressed))
             configureButton(forwardButton, imageName: "goforward.15", label: "前进15秒", action: #selector(forwardPressed))
-            configureButton(nextButton, imageName: "forward.end.fill", label: "下一集", action: #selector(nextPressed))
+            configureButton(nextButton, imageName: "forward.end", label: "下一集", action: #selector(nextPressed), weight: .light)
             configureButton(verticalRewindButton, imageName: "gobackward.15", label: "后退15秒", action: #selector(rewindPressed))
             configureButton(verticalForwardButton, imageName: "goforward.15", label: "前进15秒", action: #selector(forwardPressed))
-            configureButton(volumeButton, imageName: "speaker.wave.2.fill", label: "音量", action: #selector(volumePressed))
+            configureButton(volumeButton, imageName: "speaker.wave.2", label: "音量", action: #selector(volumePressed), weight: .light)
             configureButton(episodeButton, imageName: "list.bullet", label: "选集", action: #selector(selectEpisodePressed))
             configureTextButton(danmakuButton, title: "弹幕", width: 40, label: "弹幕设置", action: #selector(danmakuPressed))
             configureMarkerButton(introButton, title: introLabel, label: "标记片头", action: #selector(markIntroPressed), resetAction: #selector(resetIntroPressed))
@@ -2199,8 +2211,15 @@ private struct KSPlayerUIView: UIViewRepresentable {
             }
         }
 
-        private func configureButton(_ button: UIButton, imageName: String, label: String, action: Selector) {
-            button.setImage(UIImage(systemName: imageName), for: .normal)
+        private func configureButton(
+            _ button: UIButton,
+            imageName: String,
+            label: String,
+            action: Selector,
+            weight: UIImage.SymbolWeight = .regular
+        ) {
+            let symbolConfiguration = UIImage.SymbolConfiguration(pointSize: 16, weight: weight)
+            button.setImage(UIImage(systemName: imageName, withConfiguration: symbolConfiguration), for: .normal)
             button.tintColor = .white
             button.accessibilityLabel = label
             button.translatesAutoresizingMaskIntoConstraints = false

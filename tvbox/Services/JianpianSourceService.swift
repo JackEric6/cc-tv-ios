@@ -1,6 +1,12 @@
 import Foundation
 
 enum JianpianSourceService {
+    private enum FallbackAttempt: Sendable {
+        case response(Data)
+        case failed(String)
+        case discovered(String)
+    }
+
     static func search(keyword: String, preferredOrigin: String = JianpianOriginPolicy.preferredOrigin) async throws -> [Movie.Video] {
         let response = try await request(
             path: "/api/v2/search/videoV2",
@@ -57,24 +63,81 @@ enum JianpianSourceService {
         let primary = JianpianOriginPolicy.normalize(preferredOrigin)
             ?? JianpianOriginPolicy.preferredOrigin
         do {
-            return try await requestAtOrigin(path: path, origin: primary, query: query, timeout: 10, retries: 1)
+            return try await requestAtOrigin(path: path, origin: primary, query: query, timeout: 6, retries: 0)
         } catch {
             guard shouldFailover(error) else { throw error }
-            let discovered = await discoverOrigins()
-            let candidates = JianpianOriginPolicy.candidates(
-                preferred: primary,
-                discoveredServers: discovered
-            ).dropFirst()
-            var lastError: Error = error
-            for origin in candidates {
-                do {
-                    return try await requestAtOrigin(path: path, origin: origin, query: query, timeout: 4, retries: 0)
-                } catch {
-                    guard shouldFailover(error) else { throw error }
-                    lastError = error
+            return try await requestFallbacks(
+                path: path,
+                preferredOrigin: primary,
+                query: query,
+                initialError: error
+            )
+        }
+    }
+
+    private static func requestFallbacks(
+        path: String,
+        preferredOrigin: String,
+        query: [URLQueryItem],
+        initialError: Error
+    ) async throws -> [String: Any] {
+        try await withThrowingTaskGroup(of: FallbackAttempt.self) { group in
+            var attempted = Set([preferredOrigin])
+            var lastError = initialError.localizedDescription
+
+            for origin in JianpianOriginPolicy.fallbackCandidates(preferred: preferredOrigin)
+                where attempted.insert(origin).inserted {
+                group.addTask {
+                    do {
+                        let response = try await requestDataAtOrigin(
+                            path: path,
+                            origin: origin,
+                            query: query,
+                            timeout: 4,
+                            retries: 0
+                        )
+                        return .response(response)
+                    } catch {
+                        return .failed(error.localizedDescription)
+                    }
                 }
             }
-            throw lastError
+            group.addTask {
+                .discovered(await discoverOrigins())
+            }
+
+            while let attempt = try await group.next() {
+                switch attempt {
+                case .response(let data):
+                    group.cancelAll()
+                    return try decodeResponse(data)
+                case .failed(let message):
+                    lastError = message
+                case .discovered(let servers):
+                    for origin in JianpianOriginPolicy.candidates(
+                        preferred: preferredOrigin,
+                        discoveredServers: servers
+                    ).dropFirst() {
+                        guard attempted.insert(origin).inserted else { continue }
+                        group.addTask {
+                            do {
+                                let response = try await requestDataAtOrigin(
+                                    path: path,
+                                    origin: origin,
+                                    query: query,
+                                    timeout: 4,
+                                    retries: 0
+                                )
+                                return .response(response)
+                            } catch {
+                                return .failed(error.localizedDescription)
+                            }
+                        }
+                    }
+                }
+            }
+
+            throw SourceError.invalidResponse("荐片备用线路均不可用：\(lastError)")
         }
     }
 
@@ -98,6 +161,22 @@ enum JianpianSourceService {
         timeout: Int,
         retries: Int
     ) async throws -> [String: Any] {
+        try decodeResponse(await requestDataAtOrigin(
+            path: path,
+            origin: origin,
+            query: query,
+            timeout: timeout,
+            retries: retries
+        ))
+    }
+
+    private static func requestDataAtOrigin(
+        path: String,
+        origin: String,
+        query: [URLQueryItem],
+        timeout: Int,
+        retries: Int
+    ) async throws -> Data {
         var components = URLComponents(string: origin + path)
         components?.queryItems = query
         guard let url = components?.url?.absoluteString else {
@@ -115,7 +194,14 @@ enum JianpianSourceService {
             maxRetries: retries
         )
         guard let data = text.data(using: .utf8),
-              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+              (try? JSONSerialization.jsonObject(with: data)) is [String: Any] else {
+            throw SourceError.invalidResponse("荐片接口响应格式无效")
+        }
+        return data
+    }
+
+    private static func decodeResponse(_ data: Data) throws -> [String: Any] {
+        guard let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw SourceError.invalidResponse("荐片接口响应格式无效")
         }
         return value

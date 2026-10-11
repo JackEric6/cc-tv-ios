@@ -55,6 +55,14 @@ jobs:
             -o /tmp/verify-jianpian-origin
           /tmp/verify-jianpian-origin
 
+      - name: Verify bundled default config migration
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/DefaultConfigURLPolicy.swift \
+            scripts/verify-default-config-url.swift \
+            -o /tmp/verify-default-config-url
+          /tmp/verify-default-config-url
+
       - name: Verify Android-compatible playback line selection
         run: |
           swiftc -parse-as-library \
@@ -271,9 +279,9 @@ jobs:
           from pathlib import Path
 
           expected_default_url = "bundle://xgzy_config_all.json"
-          app_source = Path("tvbox/tvboxApp.swift").read_text(encoding="utf-8")
-          assert expected_default_url in app_source
-          assert 'legacyDefaultConfigURL' in app_source
+          config_policy = Path("tvbox/Models/DefaultConfigURLPolicy.swift").read_text(encoding="utf-8")
+          assert expected_default_url in config_policy
+          assert 'legacyURL' in config_policy
           config_loader = Path("tvbox/Services/ApiConfig.swift").read_text(encoding="utf-8")
           assert 'hasPrefix("bundle://")' in config_loader
           assert 'normalized == "bundle://xgzy_config_all.json"' in config_loader

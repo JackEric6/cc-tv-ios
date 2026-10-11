@@ -1,12 +1,18 @@
 #if os(iOS)
-import DanmakuKit
+import QuartzCore
 import UIKit
 
-/// Media-time scheduler backed by DanmakuKit's asynchronous cells and lane collision checks.
+/// Positions comments from the media clock so buffering and rate changes cannot make tracks drift.
 final class DanmakuOverlayView: UIView {
-    private let renderer = DanmakuKit.DanmakuView()
-    private var rendererHeightConstraint: NSLayoutConstraint!
+    private struct ActiveCue {
+        let cue: DanmuCue
+        let trajectory: DanmakuScrollTrajectory
+        let lane: Int
+        let label: UILabel
+    }
+
     private var cues: [DanmuCue] = []
+    private var activeCues: [String: ActiveCue] = [:]
     private var nextCueIndex = 0
     private var displayLink: CADisplayLink?
     private var mediaTime: TimeInterval = 0
@@ -16,11 +22,12 @@ final class DanmakuOverlayView: UIView {
     private var hasTimeAnchor = false
     private var playbackActive = true
     private var lastLayoutSize = CGSize.zero
-    private var rendererLayoutIsReady = false
+    private var layoutIsReady = false
     private var settings = DanmakuDisplaySettings()
 
     private let minimumActiveWindow: TimeInterval = 5
     private let maxCuesPerFrame = 40
+    private let minimumLaneGap = 18.0
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -37,25 +44,10 @@ final class DanmakuOverlayView: UIView {
         backgroundColor = .clear
         clipsToBounds = true
         accessibilityElementsHidden = true
-
-        renderer.translatesAutoresizingMaskIntoConstraints = false
-        renderer.backgroundColor = .clear
-        renderer.isUserInteractionEnabled = false
-        renderer.enableCellReusable = true
-        renderer.isOverlap = false
-        addSubview(renderer)
-        rendererHeightConstraint = renderer.heightAnchor.constraint(equalToConstant: 0)
-        NSLayoutConstraint.activate([
-            renderer.leadingAnchor.constraint(equalTo: leadingAnchor),
-            renderer.trailingAnchor.constraint(equalTo: trailingAnchor),
-            renderer.topAnchor.constraint(equalTo: topAnchor),
-            rendererHeightConstraint
-        ])
     }
 
     deinit {
         displayLink?.invalidate()
-        renderer.stop()
     }
 
     func setCues(_ cues: [DanmuCue]) {
@@ -72,16 +64,10 @@ final class DanmakuOverlayView: UIView {
     func updateSettings(_ settings: DanmakuDisplaySettings) {
         let now = currentTimelineTime()
         self.settings = settings.normalized
-        rendererLayoutIsReady = false
-        applyTrackSettings()
-        setNeedsLayout()
-        layoutIfNeeded()
-        applyTrackSettings()
-        if rendererLayoutIsReady {
-            renderer.clean()
-        }
+        layoutIsReady = bounds.width > 0 && bounds.height > 0
+        clearActiveCues()
         nextCueIndex = lowerBound(for: max(0, now - activeDisplayWindow))
-        if rendererLayoutIsReady {
+        if layoutIsReady, hasTimeAnchor, !cues.isEmpty {
             render(at: now)
         }
     }
@@ -93,38 +79,25 @@ final class DanmakuOverlayView: UIView {
         }
         playbackActive = active
         wallClockAnchor = CACurrentMediaTime()
-
-        if active {
-            ensureRendererPlaying()
-        } else if renderer.status == .play {
-            renderer.pause()
-        }
         displayLink?.isPaused = !active
     }
 
     /// The player supplies media time; the display link only interpolates between callbacks.
     func update(currentTime: TimeInterval, duration: TimeInterval = 0, playbackRate: Double = 1) {
         let boundedTime = max(0, currentTime.isFinite ? currentTime : 0)
-        let hadTimeAnchor = hasTimeAnchor
-        let expectedTime = hadTimeAnchor ? currentTimelineTime() : nil
         let didSeek = DanmakuTimelinePolicy.didSeek(
-            from: expectedTime,
+            from: hasTimeAnchor ? currentTimelineTime() : nil,
             to: boundedTime
         )
-        let normalizedRate = DanmakuTimelinePolicy.playbackRate(playbackRate)
-        let rateChanged = hadTimeAnchor && abs(self.playbackRate - normalizedRate) > 0.02
 
         mediaDuration = max(0, duration.isFinite ? duration : 0)
         mediaTime = boundedTime
-        self.playbackRate = normalizedRate
+        self.playbackRate = DanmakuTimelinePolicy.playbackRate(playbackRate)
         wallClockAnchor = CACurrentMediaTime()
         hasTimeAnchor = true
 
-        if !hadTimeAnchor || didSeek {
-            renderer.clean()
-            nextCueIndex = lowerBound(for: max(0, boundedTime - activeDisplayWindow))
-        } else if rateChanged {
-            renderer.clean()
+        if didSeek {
+            clearActiveCues()
             nextCueIndex = lowerBound(for: max(0, boundedTime - activeDisplayWindow))
         }
 
@@ -135,7 +108,7 @@ final class DanmakuOverlayView: UIView {
     }
 
     func reset() {
-        renderer.stop()
+        clearActiveCues()
         nextCueIndex = 0
         mediaTime = 0
         mediaDuration = 0
@@ -164,58 +137,15 @@ final class DanmakuOverlayView: UIView {
         let layoutChanged = bounds.size != lastLayoutSize
         if layoutChanged {
             lastLayoutSize = bounds.size
-            rendererLayoutIsReady = false
+            layoutIsReady = bounds.width > 0 && bounds.height > 0
+            clearActiveCues()
+            guard layoutIsReady, hasTimeAnchor, !cues.isEmpty else { return }
+            let now = currentTimelineTime()
+            nextCueIndex = lowerBound(for: max(0, now - activeDisplayWindow))
+            render(at: now)
+        } else {
+            layoutIsReady = bounds.width > 0 && bounds.height > 0
         }
-        guard layoutChanged || !rendererLayoutIsReady else { return }
-        applyTrackSettings()
-        guard rendererLayoutIsReady, hasTimeAnchor, !cues.isEmpty else { return }
-        render(at: currentTimelineTime())
-    }
-
-    private func applyTrackSettings() {
-        guard bounds.width.isFinite, bounds.height.isFinite,
-              bounds.width > 0, bounds.height > 0 else {
-            rendererLayoutIsReady = false
-            return
-        }
-
-        let rowCount = max(1, settings.rowCount)
-        let viewportWidth = Double(bounds.width)
-        let viewportHeight = Double(bounds.height)
-        let trackHeight = DanmakuTimelinePolicy.trackHeight(
-            viewportHeight: viewportHeight,
-            sizeScale: Double(settings.sizeScale)
-        )
-        let regionHeight = DanmakuTimelinePolicy.trackRegionHeight(
-            viewportHeight: viewportHeight,
-            rowCount: rowCount,
-            trackHeight: trackHeight
-        )
-
-        guard trackHeight.isFinite, trackHeight > 0,
-              regionHeight.isFinite, regionHeight > 0 else {
-            rendererLayoutIsReady = false
-            return
-        }
-
-        rendererHeightConstraint.constant = CGFloat(regionHeight)
-        renderer.setNeedsLayout()
-        renderer.layoutIfNeeded()
-        guard DanmakuTimelinePolicy.hasUsableRendererLayout(
-            viewportWidth: viewportWidth,
-            viewportHeight: viewportHeight,
-            rendererWidth: Double(renderer.bounds.width),
-            rendererHeight: Double(renderer.bounds.height)
-        ) else {
-            rendererLayoutIsReady = false
-            setNeedsLayout()
-            return
-        }
-
-        renderer.displayArea = 1
-        renderer.trackHeight = CGFloat(trackHeight)
-        renderer.layoutIfNeeded()
-        rendererLayoutIsReady = true
     }
 
     private func startDisplayLinkIfNeeded() {
@@ -243,9 +173,8 @@ final class DanmakuOverlayView: UIView {
     }
 
     private func render(at time: TimeInterval) {
-        guard rendererLayoutIsReady,
-              bounds.width > 0, bounds.height > 0 else { return }
-        ensureRendererPlaying()
+        guard layoutIsReady, bounds.width > 0, bounds.height > 0 else { return }
+        updateActiveCuePositions(at: time)
 
         var emitted = 0
         while nextCueIndex < cues.count, emitted < maxCuesPerFrame {
@@ -254,33 +183,109 @@ final class DanmakuOverlayView: UIView {
             guard cueTime <= time else { break }
             nextCueIndex += 1
 
-            let mediaDuration = displayDuration(for: cue)
-            let age = time - cueTime
-            guard DanmakuTimelinePolicy.shouldDisplayCue(age: age, duration: mediaDuration) else { continue }
-            emit(cue, age: age, mediaDuration: mediaDuration)
+            let duration = displayDuration(for: cue)
+            guard DanmakuTimelinePolicy.shouldDisplayCue(age: time - cueTime, duration: duration) else {
+                continue
+            }
+            place(cue, startTime: cueTime, at: time, duration: duration)
             emitted += 1
         }
     }
 
-    private func emit(_ cue: DanmuCue, age: TimeInterval, mediaDuration: TimeInterval) {
+    private func place(_ cue: DanmuCue, startTime: TimeInterval, at time: TimeInterval, duration: TimeInterval) {
         let size = max(12, min(36, CGFloat(cue.size) * settings.sizeScale))
-        let font = UIFont.systemFont(ofSize: size)
-        let color = displayColor(for: cue)
-        let model = TimedDanmakuCellModel(
-            cue: cue,
-            font: font,
-            color: color,
-            opacity: CGFloat(settings.opacity) / 100,
-            mediaDuration: mediaDuration,
-            playbackRate: playbackRate
+        let font = UIFont.systemFont(ofSize: size, weight: .regular)
+        let textWidth = (cue.text as NSString).size(withAttributes: [.font: font]).width
+        let cueWidth = max(24, ceil(textWidth) + 8)
+        let trajectory = DanmakuScrollTrajectory(
+            startTime: startTime,
+            duration: duration,
+            width: Double(cueWidth)
         )
-        let progress = Float(min(max(age / mediaDuration, 0), 1))
-        renderer.sync(danmaku: model, at: progress)
+        let rows = availableLaneCount
+        guard rows > 0 else { return }
+
+        let existingByLane = Dictionary(grouping: activeCues.values, by: \.lane)
+        guard let lane = (0..<rows).first(where: { lane in
+            let existing = (existingByLane[lane] ?? []).map(\.trajectory)
+            return DanmakuTimelinePolicy.canPlace(
+                trajectory,
+                with: existing,
+                at: time,
+                viewportWidth: Double(bounds.width),
+                minimumGap: minimumLaneGap
+            )
+        }) else {
+            return
+        }
+
+        let opacity = CGFloat(settings.opacity) / 100
+        let label = UILabel(frame: .zero)
+        label.isUserInteractionEnabled = false
+        label.textAlignment = .center
+        label.numberOfLines = 1
+        label.font = font
+        label.attributedText = NSAttributedString(
+            string: cue.text,
+            attributes: [
+                .font: font,
+                .foregroundColor: displayColor(for: cue).withAlphaComponent(opacity),
+                .strokeColor: UIColor.black.withAlphaComponent(opacity),
+                .strokeWidth: -1.2
+            ]
+        )
+        label.frame.size = CGSize(width: cueWidth, height: laneHeight)
+        addSubview(label)
+        let active = ActiveCue(cue: cue, trajectory: trajectory, lane: lane, label: label)
+        activeCues[cue.id] = active
+        updatePosition(of: active, at: time)
+    }
+
+    private func updateActiveCuePositions(at time: TimeInterval) {
+        let expired = activeCues.values.filter { time - $0.trajectory.startTime > $0.trajectory.duration }
+        for active in expired {
+            active.label.removeFromSuperview()
+            activeCues.removeValue(forKey: active.cue.id)
+        }
+
+        for active in activeCues.values {
+            updatePosition(of: active, at: time)
+        }
+    }
+
+    private func updatePosition(of active: ActiveCue, at time: TimeInterval) {
+        guard let position = active.trajectory.position(
+            at: time,
+            viewportWidth: Double(bounds.width)
+        ) else { return }
+        active.label.frame = CGRect(
+            x: position.minX,
+            y: CGFloat(active.lane) * laneHeight,
+            width: position.width,
+            height: laneHeight
+        )
+    }
+
+    private func clearActiveCues() {
+        activeCues.values.forEach { $0.label.removeFromSuperview() }
+        activeCues.removeAll(keepingCapacity: true)
+    }
+
+    private var laneHeight: CGFloat {
+        CGFloat(DanmakuTimelinePolicy.trackHeight(
+            viewportHeight: Double(bounds.height),
+            sizeScale: Double(settings.sizeScale)
+        ))
+    }
+
+    private var availableLaneCount: Int {
+        guard laneHeight > 0 else { return 0 }
+        return min(settings.rowCount, max(1, Int(bounds.height / laneHeight)))
     }
 
     private func displayDuration(for cue: DanmuCue) -> TimeInterval {
         let fontSize = max(12, min(36, CGFloat(cue.size) * settings.sizeScale))
-        let font = UIFont.systemFont(ofSize: fontSize)
+        let font = UIFont.systemFont(ofSize: fontSize, weight: .regular)
         let textSize = (cue.text as NSString).size(withAttributes: [.font: font])
         let cueWidth = max(24, ceil(textSize.width) + 8)
         return DanmakuTimelinePolicy.scrollingDuration(
@@ -303,16 +308,6 @@ final class DanmakuOverlayView: UIView {
         return UIColor(rgb: UInt32(truncatingIfNeeded: cue.color))
     }
 
-    private func ensureRendererPlaying() {
-        guard rendererLayoutIsReady else { return }
-        if renderer.status != .play {
-            renderer.play()
-        }
-        if !playbackActive, renderer.status == .play {
-            renderer.pause()
-        }
-    }
-
     private func lowerBound(for time: TimeInterval) -> Int {
         let target = Int(max(0, time) * 1000)
         var low = 0
@@ -322,72 +317,6 @@ final class DanmakuOverlayView: UIView {
             if cues[mid].timeMs < target { low = mid + 1 } else { high = mid }
         }
         return low
-    }
-}
-
-private final class TimedDanmakuCellModel: DanmakuCellModel {
-    let cue: DanmuCue
-    let font: UIFont
-    let color: UIColor
-    let opacity: CGFloat
-    let mediaDuration: TimeInterval
-    let playbackRate: Double
-    let size: CGSize
-    var track: UInt?
-
-    var identifier: String { cue.id }
-    var cellClass: DanmakuCell.Type { TimedDanmakuCell.self }
-    var displayTime: Double { mediaDuration / playbackRate }
-    var type: DanmakuCellType { .floating }
-
-    init(
-        cue: DanmuCue,
-        font: UIFont,
-        color: UIColor,
-        opacity: CGFloat,
-        mediaDuration: TimeInterval,
-        playbackRate: Double
-    ) {
-        self.cue = cue
-        self.font = font
-        self.color = color.withAlphaComponent(opacity)
-        self.opacity = opacity
-        self.mediaDuration = mediaDuration
-        self.playbackRate = max(0.25, playbackRate)
-        let textSize = (cue.text as NSString).size(withAttributes: [.font: font])
-        size = CGSize(width: max(24, ceil(textSize.width) + 8), height: max(24, ceil(textSize.height) + 4))
-    }
-
-    func isEqual(to cellModel: DanmakuCellModel) -> Bool {
-        identifier == cellModel.identifier
-    }
-}
-
-private final class TimedDanmakuCell: DanmakuCell {
-    required init(frame: CGRect) {
-        super.init(frame: frame)
-        backgroundColor = .clear
-        displayAsync = true
-    }
-
-    required init?(coder: NSCoder) { nil }
-
-    override func displaying(_ context: CGContext, _ size: CGSize, _ isCancelled: Bool) {
-        guard !isCancelled, let model = model as? TimedDanmakuCellModel else { return }
-        let text = model.cue.text as NSString
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: model.font,
-            .foregroundColor: model.color
-        ]
-        context.setLineWidth(max(0.65, model.font.pointSize * 0.04))
-        context.setLineJoin(.round)
-        context.setStrokeColor(UIColor.black.withAlphaComponent(model.opacity).cgColor)
-        context.saveGState()
-        context.setTextDrawingMode(.stroke)
-        text.draw(at: CGPoint(x: 4, y: 2), withAttributes: attributes)
-        context.restoreGState()
-        context.setTextDrawingMode(.fill)
-        text.draw(at: CGPoint(x: 4, y: 2), withAttributes: attributes)
     }
 }
 

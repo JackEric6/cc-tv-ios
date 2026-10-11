@@ -140,7 +140,7 @@ struct SearchView: View {
             Button {
                 Task { await viewModel.search() }
             } label: {
-                Text("搜索")
+                Text(apiConfig.isLoaded ? "搜索" : "加载中")
                     .font(.system(size: 15, weight: .bold))
                     .foregroundColor(.white)
                     .padding(.horizontal, 16)
@@ -149,6 +149,8 @@ struct SearchView: View {
                     .cornerRadius(14)
             }
             .buttonStyle(.plain)
+            .disabled(!apiConfig.isLoaded || viewModel.isSearching)
+            .opacity(apiConfig.isLoaded ? 1 : 0.65)
         }
             if !viewModel.keyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                !viewModel.isSearching,

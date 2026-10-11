@@ -9,19 +9,17 @@ enum CongcongBrand {
     static let appName = "丛丛影视"
     static let credit = "Made By 丛丛"
     /// 默认点播配置从 App Bundle 读取，不通过网络拉取远程 JSON。
-    static let defaultConfigURL = "bundle://xgzy_config_all.json"
-    static let legacyDefaultConfigURL = "https://ghproxy.net/https://raw.githubusercontent.com/JackEric6/movie/refs/heads/xgzy-config-20260922/movie2_xgzy_all"
+    static let defaultConfigURL = DefaultConfigURLPolicy.bundledURL
+    static let legacyDefaultConfigURL = DefaultConfigURLPolicy.legacyURL
 
     static func migratedConfigURL(_ value: String) -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.caseInsensitiveCompare(legacyDefaultConfigURL) == .orderedSame
-            ? defaultConfigURL : trimmed
+        DefaultConfigURLPolicy.migratedURL(value)
     }
 
     static func migrateLegacyDefaultConfig(in defaults: UserDefaults = .standard) {
         let savedVod = defaults.string(forKey: HawkConfig.API_URL)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let savedLive = defaults.string(forKey: HawkConfig.LIVE_API_URL)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !savedVod.isEmpty && migratedConfigURL(savedVod) != savedVod {
+        if savedVod.isEmpty || migratedConfigURL(savedVod) != savedVod {
             defaults.set(defaultConfigURL, forKey: HawkConfig.API_URL)
         }
         if !savedLive.isEmpty && migratedConfigURL(savedLive) != savedLive {
