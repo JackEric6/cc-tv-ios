@@ -51,6 +51,26 @@ struct VerifyDanmakuTimeline {
             viewportWidth: 0,
             cueWidth: 40
         ) == 0)
+        let shortSeekWindow = DanmakuTimelinePolicy.activeDisplayWindow(
+            baseDuration: 8,
+            viewportWidth: 1000,
+            maximumTextLength: 12,
+            maximumFontSize: 36
+        )
+        let longSeekWindow = DanmakuTimelinePolicy.activeDisplayWindow(
+            baseDuration: 8,
+            viewportWidth: 1000,
+            maximumTextLength: 80,
+            maximumFontSize: 36
+        )
+        precondition(shortSeekWindow >= 5)
+        precondition(longSeekWindow > shortSeekWindow)
+        precondition(DanmakuTimelinePolicy.activeDisplayWindow(
+            baseDuration: 8,
+            viewportWidth: 0,
+            maximumTextLength: 12,
+            maximumFontSize: 36
+        ) == 5)
         precondition(DanmakuTimelinePolicy.isPlaybackActive(isPlaying: true))
         precondition(!DanmakuTimelinePolicy.isPlaybackActive(isPlaying: false))
         precondition(DanmakuTimelinePolicy.shouldDisplayCue(age: 2, duration: 8))

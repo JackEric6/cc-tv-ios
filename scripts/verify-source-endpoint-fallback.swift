@@ -41,11 +41,14 @@ struct VerifySourceEndpointFallback {
         precondition(ffzy.contains { $0.contains("api.ffzyapi.com/api.php/provide/vod/?ac=detail&wd=test") })
 
         let dytt = SourceEndpointRequestPolicy.candidates(
-            for: "https://caiji.dyttzyapi.com/api.php/provide/vod/?ac=detail&wd=test",
+            for: "https://caiji.dyttzyapi.com/api.php/provide/vod/?ac=detail&wd=%E6%8A%93%E7%89%B9%E5%8A%A1",
             backupAPIs: [],
             backupDomains: []
         )
-        precondition(dytt.contains { $0.contains("/api.php/provide/vod/from/dyttm3u8/?ac=detail&wd=test") })
+        precondition(dytt.contains {
+            $0.contains("/api.php/provide/vod/from/dyttm3u8/?ac=detail")
+                && $0.contains("wd=%E6%8A%93%E7%89%B9%E5%8A%A1")
+        })
 
         let xintong = SourceEndpointRequestPolicy.candidates(
             for: "https://cj.ffzyapi.com/api.php/provide/vod/?ac=detail&wd=test",

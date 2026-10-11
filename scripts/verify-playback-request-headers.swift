@@ -49,6 +49,15 @@ struct VerifyPlaybackRequestHeaders {
         )
         precondition(fallbackCMSHeaders["User-Agent"] == PlaybackRequestHeaderPolicy.androidCMSPlaybackUserAgent)
         precondition(fallbackCMSHeaders["Referer"] == nil)
+        let cz4kHeaders = PlaybackRequestHeaderPolicy.applyingSourceSpecificPlaybackHeaders(
+            to: PlaybackRequestHeaderPolicy.applyingCMSPlaybackHeaders(
+                to: otherHeaders,
+                sourceKey: "cz4k"
+            ),
+            sourceKey: " CZ4K "
+        )
+        precondition(cz4kHeaders["User-Agent"] == PlaybackRequestHeaderPolicy.cz4kBrowserUserAgent)
+        precondition(cz4kHeaders["Referer"] == PlaybackRequestHeaderPolicy.cz4kReferer)
         precondition(PlaybackRequestHeaderPolicy.appliesToCMSPlayback(sourceType: 0))
         precondition(PlaybackRequestHeaderPolicy.appliesToCMSPlayback(sourceType: 1))
         precondition(!PlaybackRequestHeaderPolicy.appliesToCMSPlayback(sourceType: 4))

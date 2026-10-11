@@ -45,6 +45,9 @@ enum PlaybackRequestHeaderPolicy {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
     static let androidCMSPlaybackUserAgent =
         "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
+    static let cz4kBrowserUserAgent =
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    static let cz4kReferer = "https://www.cz4k.com/"
 
     static func appliesToCMSPlayback(sourceType: Int) -> Bool {
         sourceType == 0 || sourceType == 1
@@ -66,6 +69,24 @@ enum PlaybackRequestHeaderPolicy {
         if let referer = cmsSourceReferers[key] {
             result["Referer"] = referer
         }
+        return result
+    }
+
+    static func applyingSourceSpecificPlaybackHeaders(
+        to headers: [String: String],
+        sourceKey: String
+    ) -> [String: String] {
+        guard sourceKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare("cz4k") == .orderedSame else {
+            return headers
+        }
+        var result = headers
+        result.keys.filter { $0.caseInsensitiveCompare("User-Agent") == .orderedSame }
+            .forEach { result.removeValue(forKey: $0) }
+        result.keys.filter { $0.caseInsensitiveCompare("Referer") == .orderedSame }
+            .forEach { result.removeValue(forKey: $0) }
+        result["User-Agent"] = cz4kBrowserUserAgent
+        result["Referer"] = cz4kReferer
         return result
     }
 

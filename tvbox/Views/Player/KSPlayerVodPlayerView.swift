@@ -1457,6 +1457,9 @@ private struct KSPlayerUIView: UIViewRepresentable {
         KSOptions.enableBrightnessGestures = true
         KSOptions.enableVolumeGestures = true
         let options = KSOptions()
+        options.preferredForwardBufferDuration = 8
+        options.maxBufferDuration = 60
+        options.isAccurateSeek = false
         playbackHeaders.forEach { options.appendHeader([$0.key: $0.value]) }
         // Start position is restored by the guarded seek path above. Leaving a
         // second native start-time request enabled can race that single seek.

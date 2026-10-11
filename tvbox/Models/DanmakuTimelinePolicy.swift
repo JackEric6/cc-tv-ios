@@ -106,6 +106,30 @@ enum DanmakuTimelinePolicy {
         return baseDuration * (viewportWidth + cueWidth) / viewportWidth
     }
 
+    static func activeDisplayWindow(
+        baseDuration: TimeInterval,
+        viewportWidth: Double,
+        maximumTextLength: Int,
+        maximumFontSize: Double,
+        minimumWindow: TimeInterval = 5
+    ) -> TimeInterval {
+        guard baseDuration.isFinite, baseDuration > 0,
+              viewportWidth.isFinite, viewportWidth > 0,
+              maximumFontSize.isFinite, maximumFontSize > 0 else {
+            return max(0, minimumWindow.isFinite ? minimumWindow : 0)
+        }
+        let safeLength = Double(max(0, maximumTextLength))
+        let estimatedWidth = safeLength * maximumFontSize + 8
+        return max(
+            max(0, minimumWindow.isFinite ? minimumWindow : 0),
+            scrollingDuration(
+                baseDuration: baseDuration,
+                viewportWidth: viewportWidth,
+                cueWidth: estimatedWidth
+            )
+        )
+    }
+
     static func canFollowScrollingBullet(
         previousRightEdge: Double,
         previousSpeed: Double,

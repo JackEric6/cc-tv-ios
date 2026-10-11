@@ -73,7 +73,8 @@ actor M3U8Purifier {
             let firstResponse = try await network.getStringResponse(
                 from: url.absoluteString,
                 headers: headers.isEmpty ? nil : headers,
-                maxRetries: 1
+                timeout: 5,
+                maxRetries: 0
             )
             let firstContent = Self.normalizeManifest(firstResponse.text)
             guard firstContent.hasPrefix("#EXTM3U") else {
@@ -86,7 +87,8 @@ actor M3U8Purifier {
                 let variantResponse = try await network.getStringResponse(
                     from: variant.absoluteString,
                     headers: headers.isEmpty ? nil : headers,
-                    maxRetries: 1
+                    timeout: 5,
+                    maxRetries: 0
                 )
                 targetURL = variantResponse.finalURL
                 content = Self.normalizeManifest(variantResponse.text)

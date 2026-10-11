@@ -6,10 +6,48 @@ import WebKit
 
 enum Cz4kSourceService {
     private static let origin = "https://www.cz4k.com"
-    private static let headers = [
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-        "Referer": origin + "/"
-    ]
+    private static let headers = PlaybackRequestHeaderPolicy.applyingSourceSpecificPlaybackHeaders(
+        to: [:],
+        sourceKey: "cz4k"
+    )
+
+    static func resolvePlaybackMedia(
+        from rawURL: String,
+        configuredHeaders: [String: String]? = nil
+    ) async throws -> ResolvedPlaybackMedia? {
+        #if os(iOS)
+        guard let pageURL = URL(string: rawURL),
+              let host = pageURL.host?.lowercased(),
+              host == "cz4k.com" || host.hasSuffix(".cz4k.com"),
+              KktvsResponseNormalizer.directMediaURL(rawURL) == nil else {
+            return nil
+        }
+
+        let html = try await Cz4kBrowserSession.loadHTML(pageURL, headers: configuredHeaders ?? [:])
+        guard let extracted = KktvsResponseNormalizer.extractMediaURL(
+            from: html,
+            baseURL: pageURL.absoluteString
+        ),
+              let mediaURL = SourceService.validPlayableURL(extracted),
+              mediaURL != pageURL.absoluteString else {
+            throw SourceError.invalidPlayableURL(rawURL)
+        }
+        var requestHeaders = headers
+        configuredHeaders?.forEach { key, value in
+            requestHeaders.keys
+                .filter { $0.caseInsensitiveCompare(key) == .orderedSame }
+                .forEach { requestHeaders.removeValue(forKey: $0) }
+            requestHeaders[key] = value
+        }
+        requestHeaders = PlaybackRequestHeaderPolicy.applyingRefererOverride(
+            pageURL.absoluteString,
+            to: requestHeaders
+        )
+        return ResolvedPlaybackMedia(url: mediaURL, headers: requestHeaders)
+        #else
+        return nil
+        #endif
+    }
     static func search(keyword: String) async throws -> [Movie.Video] {
         var components = URLComponents(string: origin + "/nimasile")
         components?.queryItems = [URLQueryItem(name: "q", value: keyword)]
@@ -140,10 +178,11 @@ enum Cz4kSourceService {
 #if os(iOS)
 @MainActor
 private final class Cz4kBrowserSession: NSObject, WKNavigationDelegate {
-    private static let userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    private static let userAgent = PlaybackRequestHeaderPolicy.cz4kBrowserUserAgent
     private static let timeout: TimeInterval = 60
 
     private let requestURL: URL
+    private let requestHeaders: [String: String]
     private let webView: WKWebView
     private let hostView: UIView
     private var continuation: CheckedContinuation<String, Error>?
@@ -151,13 +190,14 @@ private final class Cz4kBrowserSession: NSObject, WKNavigationDelegate {
     private var pollTask: Task<Void, Never>?
     private var finished = false
 
-    private init(url: URL, webView: WKWebView, hostView: UIView) {
+    private init(url: URL, headers: [String: String], webView: WKWebView, hostView: UIView) {
         requestURL = url
+        requestHeaders = headers
         self.webView = webView
         self.hostView = hostView
     }
 
-    static func loadHTML(_ url: URL) async throws -> String {
+    static func loadHTML(_ url: URL, headers: [String: String] = [:]) async throws -> String {
         guard let host = url.host?.lowercased(), host == "cz4k.com" || host.hasSuffix(".cz4k.com") else {
             throw SourceError.invalidApiUrl(url.absoluteString)
         }
@@ -183,7 +223,12 @@ private final class Cz4kBrowserSession: NSObject, WKNavigationDelegate {
         hostView.addSubview(webView)
         window.addSubview(hostView)
 
-        let session = Cz4kBrowserSession(url: url, webView: webView, hostView: hostView)
+        let session = Cz4kBrowserSession(
+            url: url,
+            headers: headers,
+            webView: webView,
+            hostView: hostView
+        )
         webView.navigationDelegate = session
         return try await session.load()
     }
@@ -205,7 +250,8 @@ private final class Cz4kBrowserSession: NSObject, WKNavigationDelegate {
                 }
                 var request = URLRequest(url: requestURL, timeoutInterval: Self.timeout)
                 request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
-                request.setValue("https://www.cz4k.com/", forHTTPHeaderField: "Referer")
+                request.setValue(PlaybackRequestHeaderPolicy.cz4kReferer, forHTTPHeaderField: "Referer")
+                requestHeaders.forEach { request.setValue($1, forHTTPHeaderField: $0) }
                 webView.load(request)
             }
         } onCancel: { [weak self] in
@@ -241,9 +287,20 @@ private final class Cz4kBrowserSession: NSObject, WKNavigationDelegate {
         (function() {
           var title = document.title || '';
           var text = (document.body && document.body.innerText) || '';
+          var mediaURLs = [];
+          document.querySelectorAll('video, source').forEach(function(node) {
+            var value = node.currentSrc || node.src || node.getAttribute('src') || '';
+            if (value) mediaURLs.push(value);
+          });
+          performance.getEntriesByType('resource').forEach(function(entry) {
+            if (/\\.(m3u8|mp4|mpd|flv|mkv|webm|mov)(?:[?#]|$)/i.test(entry.name)) {
+              mediaURLs.push(entry.name);
+            }
+          });
+          mediaURLs = Array.from(new Set(mediaURLs));
           var challengeWidget = !!document.querySelector('cap-widget');
           var challengeText = /雷池|safeline|安全检查|访问验证|请稍候|正在验证|验证中|验证失败|checking your browser|verifying you are human|403 forbidden|access denied|人机验证/i.test(title + ' ' + text);
-          return JSON.stringify({html: document.documentElement ? document.documentElement.outerHTML : '', challenge: challengeWidget || challengeText, textLength: text.length});
+          return JSON.stringify({html: document.documentElement ? document.documentElement.outerHTML : '', mediaURLs: mediaURLs, challenge: challengeWidget || challengeText, textLength: text.length});
         })();
         """
         webView.evaluateJavaScript(script) { [weak self] value, error in
@@ -264,11 +321,17 @@ private final class Cz4kBrowserSession: NSObject, WKNavigationDelegate {
             }
             let html = page["html"] as? String ?? ""
             let textLength = page["textLength"] as? Int ?? 0
-            guard !html.isEmpty, textLength > 0 else {
+            let mediaURLs = page["mediaURLs"] as? [String] ?? []
+            let mediaPayload = mediaURLs.compactMap { url -> String? in
+                guard let data = try? JSONSerialization.data(withJSONObject: ["url": url]),
+                      let json = String(data: data, encoding: .utf8) else { return nil }
+                return json
+            }.joined(separator: "\n")
+            guard !html.isEmpty, textLength > 0 || !mediaPayload.isEmpty else {
                 self.scheduleInspection()
                 return
             }
-            self.finish(.success(html))
+            self.finish(.success(html + "\n" + mediaPayload))
         }
     }
 

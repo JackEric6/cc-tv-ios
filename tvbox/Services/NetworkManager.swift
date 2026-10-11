@@ -55,6 +55,8 @@ class NetworkManager {
         config.timeoutIntervalForRequest = 12
         config.timeoutIntervalForResource = 20
         config.httpMaximumConnectionsPerHost = 5
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.urlCache = nil
         // 失效源不应在系统等待网络可达时长期占住详情/首页请求。
         // 网络恢复由 NetworkMonitor 触发上层重新验证。
         config.waitsForConnectivity = false
@@ -89,6 +91,7 @@ class NetworkManager {
 
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         if let timeout, timeout > 0 {
             request.timeoutInterval = TimeInterval(timeout)
         }
@@ -126,7 +129,8 @@ class NetworkManager {
         guard let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             throw NetworkError.invalidURL(urlString)
         }
-        let request = URLRequest(url: url)
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         let (data, _) = try await performRequest(request, maxRetries: maxRetries)
         return data
     }

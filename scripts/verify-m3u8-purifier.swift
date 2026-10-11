@@ -9,12 +9,16 @@ final class NetworkManager {
     static let shared = NetworkManager()
     private(set) var requestCount = 0
     private(set) var requestedURLs: [String] = []
+    private(set) var requestedTimeouts: [Int?] = []
+    private(set) var requestedRetryCounts: [Int] = []
     private var responses: [String: String] = [:]
     private var finalURLs: [String: String] = [:]
 
     func configure(responses: [String: String], finalURLs: [String: String] = [:]) {
         requestCount = 0
         requestedURLs = []
+        requestedTimeouts = []
+        requestedRetryCounts = []
         self.responses = responses
         self.finalURLs = finalURLs
     }
@@ -27,6 +31,8 @@ final class NetworkManager {
     ) async throws -> StringResponse {
         requestCount += 1
         requestedURLs.append(url)
+        requestedTimeouts.append(timeout)
+        requestedRetryCounts.append(maxRetries)
         guard let response = responses[url] else { throw CocoaError(.fileReadUnknown) }
         guard let finalURL = URL(string: finalURLs[url] ?? url) else {
             throw CocoaError(.fileReadCorruptFile)
@@ -409,6 +415,8 @@ struct VerifyM3U8Purifier {
             NetworkManager.shared.requestedURLs == [xiguaMasterURL, xiguaVariantURL],
             "Xigua playback requested \(NetworkManager.shared.requestedURLs); expected the master and resolved media playlist"
         )
+        precondition(NetworkManager.shared.requestedTimeouts.compactMap { $0 } == [5, 5])
+        precondition(NetworkManager.shared.requestedRetryCounts == [0, 0])
         precondition(
             xiguaPrepared.url == xiguaMasterURL
                 && !xiguaPrepared.didPurify

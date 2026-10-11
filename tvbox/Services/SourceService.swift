@@ -568,6 +568,27 @@ class SourceService {
             return ResolvedPlaybackMedia(url: playableURL, headers: GuaziPlaybackRequest.playbackHeaders)
         }
 
+        if sourceBean.key.caseInsensitiveCompare("cz4k") == .orderedSame,
+           let browserResolved = try await Cz4kSourceService.resolvePlaybackMedia(
+            from: url,
+            configuredHeaders: sourceBean.headers
+           ) {
+            let normalized = KktvsResponseNormalizer.normalizeMediaURL(browserResolved.url)
+            guard let validURL = Self.validPlayableURL(normalized) else {
+                throw SourceError.invalidPlayableURL(browserResolved.url)
+            }
+            if KktvsResponseNormalizer.directMediaURL(validURL) != nil {
+                return ResolvedPlaybackMedia(url: validURL, headers: browserResolved.headers)
+            }
+            return try await resolvePlaybackPage(
+                sourceBean: sourceBean,
+                url: validURL,
+                visited: [KktvsResponseNormalizer.normalizeMediaURL(url)],
+                remainingPageHops: 2,
+                parentPageURL: url
+            )
+        }
+
         return try await resolvePlaybackPage(
             sourceBean: sourceBean,
             url: url,
@@ -973,6 +994,10 @@ class SourceService {
                 sourceKey: sourceBean.key
             )
         }
+        headers = PlaybackRequestHeaderPolicy.applyingSourceSpecificPlaybackHeaders(
+            to: headers,
+            sourceKey: sourceBean.key
+        )
         if SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name) == .jianpian {
             headers["User-Agent"] = "Mozilla/5.0 packageName:com.jp3.xg3"
             headers["Referer"] = "https://fan123.hzhnl.com/"
