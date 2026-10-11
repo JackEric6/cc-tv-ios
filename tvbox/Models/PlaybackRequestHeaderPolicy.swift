@@ -3,6 +3,8 @@ import Foundation
 enum PlaybackRequestHeaderPolicy {
     private static let cmsSourceReferers: [String: String] = [
         "xgzy": "https://xgzy.tv/",
+        "xigua": "https://xgzy.tv/",
+        "xiguazy": "https://xgzy.tv/",
         "zuida": "https://zuidazy.co/",
         "bdzy": "https://bdzy.tv/",
         "modu": "https://moduzy.com/",
@@ -82,6 +84,13 @@ enum PlaybackRequestHeaderPolicy {
         return result
     }
 
+    static func isXiguaSource(_ sourceKey: String) -> Bool {
+        let key = sourceKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return ["xgzy", "xigua", "xiguazy", "西瓜"].contains(key)
+            || key.contains("xgzy")
+            || key.contains("xigua")
+    }
+
     static func xiguaMediaReferer(for mediaURL: String) -> String? {
         guard let components = URLComponents(string: mediaURL),
               ["http", "https"].contains(components.scheme?.lowercased() ?? ""),
@@ -111,8 +120,7 @@ enum PlaybackRequestHeaderPolicy {
     }
 
     static func mediaRefererOverride(sourceKey: String, mediaURL: String) -> String? {
-        guard sourceKey.trimmingCharacters(in: .whitespacesAndNewlines)
-            .caseInsensitiveCompare("xgzy") == .orderedSame else {
+        guard isXiguaSource(sourceKey) else {
             return nil
         }
         return xiguaMediaReferer(for: mediaURL)

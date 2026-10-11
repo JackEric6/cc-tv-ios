@@ -5,11 +5,20 @@ import Foundation
 public final class DanmuService {
     public static let shared = DanmuService()
     public static let builtinAPI = "https://logvardanmu.konfan.cn/87654321"
-    private static let searchRequestTimeout = 12
-    private static let commentRequestTimeout = 18
-    // A danmaku request is small, so one short retry is not enough when the
-    // device is switching networks or the API briefly returns 502/429.
-    private static let requestRetryCount = 2
+    /// Android keeps this older deployment as a compatible fallback. It is
+    /// intentionally raced with the primary endpoint and never blocks it.
+    public static let builtinFallbackAPIs = [
+        // Legacy Android deployment.
+        "https://saas-oa.shyeguang.cn",
+        // Public LogVar-compatible community deployment documented by the
+        // upstream service. It uses the same DanDanPlay v2 routes.
+        "https://api.danmu.icu"
+    ]
+    private static let searchRequestTimeout = 5
+    private static let commentRequestTimeout = 8
+    // Keep one bounded retry for transient 502/429/network handoffs without
+    // making the first video frame wait behind a long retry chain.
+    private static let requestRetryCount = 1
     private static let retryBaseDelay: TimeInterval = 0.35
     private static let retryMaxDelay: TimeInterval = 2.5
     private static let cacheLifetime: TimeInterval = 300
@@ -43,8 +52,8 @@ public final class DanmuService {
 
     private static func makeSession() -> URLSession {
         let configuration = URLSessionConfiguration.default
-        configuration.timeoutIntervalForRequest = 20
-        configuration.timeoutIntervalForResource = 30
+        configuration.timeoutIntervalForRequest = 10
+        configuration.timeoutIntervalForResource = 15
         // Danmaku is independent from video-source connectivity. Waiting for a
         // stalled source request here made the search appear to fail whenever
         // a playback route was offline.
@@ -65,44 +74,38 @@ public final class DanmuService {
         episode: String,
         configuration: Configuration = Configuration()
     ) async -> [DanmuCue] {
-        var apiURLs = resolveAPIURLs(configuration)
-        apiURLs.sort { Self.isBuiltinAPI($0) && !Self.isBuiltinAPI($1) }
-        for apiURL in apiURLs {
+        let apiURLs = resolveAPIURLs(configuration)
+        return await firstNonEmpty(from: apiURLs) { [weak self] apiURL in
+            guard let self else { return [] }
             do {
-                let cues: [DanmuCue]
                 if Self.isBuiltinAPI(apiURL) {
-                    cues = try await loadBuiltin(
+                    return try await self.loadBuiltin(
                         baseURL: Self.normalizeBaseURL(apiURL),
                         title: title,
                         episode: episode
                     )
-                } else {
-                    let body = try await loadCustom(
-                        apiURL: apiURL,
-                        title: title,
-                        episode: episode,
-                        followURL: false
-                    )
-                    let directCues = try await Self.parseOffMain(body)
-                    if directCues.isEmpty {
-                        let results = Self.parseSearchResults(body)
-                        let matchedResults = results.filter {
-                            DanmakuEpisodeMatcher.matches(requestedEpisode: episode, title: $0.name)
-                        }
-                        cues = await loadFirstAvailable(matchedResults.isEmpty && results.count == 1 ? results : matchedResults)
-                    } else {
-                        cues = directCues
-                    }
                 }
-                try Task.checkCancellation()
-                if !cues.isEmpty { return cues }
+                let body = try await self.loadCustom(
+                    apiURL: apiURL,
+                    title: title,
+                    episode: episode,
+                    followURL: false
+                )
+                let directCues = try await Self.parseOffMain(body)
+                if !directCues.isEmpty { return directCues }
+                let results = Self.parseSearchResults(body)
+                let matchedResults = results.filter {
+                    DanmakuEpisodeMatcher.matches(requestedEpisode: episode, title: $0.name)
+                }
+                return await self.loadFirstAvailable(
+                    matchedResults.isEmpty && results.count == 1 ? results : matchedResults
+                )
             } catch is CancellationError {
                 return []
             } catch {
-                continue
+                return []
             }
         }
-        return []
     }
 
     /// Alias kept short for callers that prefer a fetch-style API.
@@ -173,43 +176,36 @@ public final class DanmuService {
         configuration: Configuration,
         cacheKey: String
     ) async throws -> [DanmuSearchResult] {
-        var results: [DanmuSearchResult] = []
-        var lastError: Error?
-        var apiURLs = resolveAPIURLs(configuration)
-        // The built-in Android-compatible API is the most stable path. Try it
-        // first so a stale custom endpoint cannot block search for a full timeout.
-        apiURLs.sort { Self.isBuiltinAPI($0) && !Self.isBuiltinAPI($1) }
-        for apiURL in apiURLs {
+        let apiURLs = resolveAPIURLs(configuration)
+        let uniqueResults = await firstNonEmpty(from: apiURLs) { [weak self] apiURL in
+            guard let self else { return [] }
             do {
-                let apiResults: [DanmuSearchResult]
                 if Self.isBuiltinAPI(apiURL) {
-                    apiResults = try await searchBuiltinResults(
+                    return try await self.searchBuiltinResults(
                         baseURL: Self.normalizeBaseURL(apiURL),
                         query: query,
                         episode: episode
                     )
-                } else {
-                    let body = try await loadCustom(apiURL: apiURL, title: query, episode: episode, followURL: false)
-                    apiResults = Self.parseSearchResults(body)
                 }
-                results.append(contentsOf: apiResults)
-            } catch is CancellationError {
-                throw CancellationError()
+                let body = try await self.loadCustom(
+                    apiURL: apiURL,
+                    title: query,
+                    episode: episode,
+                    followURL: false
+                )
+                return Self.parseSearchResults(body)
             } catch {
-                lastError = error
+                return []
             }
         }
-        var seen = Set<String>()
-        let uniqueResults = results.filter { seen.insert($0.url).inserted }
         // Cache both hits and misses. A temporary API outage should not make
         // every keystroke or player re-appearance wait through the full retry
         // budget again.
         pruneCachesIfNeeded()
-        searchCache[cacheKey] = (Date(), uniqueResults, uniqueResults.isEmpty && lastError != nil)
+        searchCache[cacheKey] = (Date(), uniqueResults, uniqueResults.isEmpty)
         if !uniqueResults.isEmpty {
             return uniqueResults
         }
-        if let lastError { throw lastError }
         return []
     }
 
@@ -302,18 +298,40 @@ public final class DanmuService {
     }
 
     private func loadFirstAvailable(_ results: [DanmuSearchResult]) async -> [DanmuCue] {
-        for result in results.prefix(8) {
+        await firstNonEmpty(from: Array(results.prefix(8))) { [weak self] result in
+            guard let self else { return [] }
             do {
                 try Task.checkCancellation()
-                let cues = try await loadSearchResult(result)
-                if !cues.isEmpty { return cues }
-            } catch is CancellationError {
-                return []
+                return try await self.loadSearchResult(result)
             } catch {
-                continue
+                return []
             }
         }
-        return []
+    }
+
+    /// Runs providers concurrently and returns the first parsed, non-empty
+    /// result. A dead custom endpoint therefore cannot delay the built-in
+    /// provider, and a slow primary endpoint can be superseded by the Android
+    /// compatible fallback.
+    private func firstNonEmpty<Input: Sendable, Output: Sendable>(
+        from values: [Input],
+        operation: @escaping (Input) async -> [Output]
+    ) async -> [Output] {
+        guard !values.isEmpty else { return [] }
+        return await withTaskGroup(of: [Output].self) { group in
+            for value in values {
+                group.addTask {
+                    await operation(value)
+                }
+            }
+            while let result = await group.next() {
+                if !result.isEmpty {
+                    group.cancelAll()
+                    return result
+                }
+            }
+            return []
+        }
     }
 
     private func searchBuiltinResults(
@@ -321,40 +339,44 @@ public final class DanmuService {
         query: String,
         episode: String
     ) async throws -> [DanmuSearchResult] {
-        var results: [DanmuSearchResult] = []
-        var hadSuccessfulResponse = false
-        var lastError: Error?
         let episodeNumber = Self.extractEpisodeNumber(episode)
         let episodeQueries = episodeNumber > 0 ? [String(episodeNumber), ""] : [""]
-        for variant in Self.searchTitleVariants(query) {
-            for episodeQuery in episodeQueries {
-                try Task.checkCancellation()
-                let episodesURL = try Self.makeURL(
-                    baseURL: baseURL,
-                    path: "/api/v2/search/episodes",
-                    queryItems: [
-                        URLQueryItem(name: "anime", value: variant),
-                        episodeQuery.isEmpty ? nil : URLQueryItem(name: "episode", value: episodeQuery)
-                    ].compactMap { $0 }
-                )
-                do {
-                    let body = try await getDanmakuText(
-                        from: episodesURL.absoluteString,
-                        timeout: Self.searchRequestTimeout
-                    )
-                    hadSuccessfulResponse = true
-                    results.append(contentsOf: Self.parseBuiltinSearchResults(body, baseURL: baseURL))
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch {
-                    lastError = error
+        let requests = Self.searchTitleVariants(query).flatMap { variant in
+            episodeQueries.map { (variant, $0) }
+        }
+        let results = await withTaskGroup(of: [DanmuSearchResult].self) { group in
+            for (variant, episodeQuery) in requests {
+                group.addTask { [weak self] in
+                    guard let self else { return [] }
+                    guard let episodesURL = try? Self.makeURL(
+                        baseURL: baseURL,
+                        path: "/api/v2/search/episodes",
+                        queryItems: [
+                            URLQueryItem(name: "anime", value: variant),
+                            episodeQuery.isEmpty ? nil : URLQueryItem(name: "episode", value: episodeQuery)
+                        ].compactMap { $0 }
+                    ) else { return [] }
+                    do {
+                        let body = try await self.getDanmakuText(
+                            from: episodesURL.absoluteString,
+                            timeout: Self.searchRequestTimeout
+                        )
+                        return Self.parseBuiltinSearchResults(body, baseURL: baseURL)
+                    } catch {
+                        return []
+                    }
                 }
-                if !results.isEmpty { break }
             }
-            if !results.isEmpty { break }
+            var merged: [DanmuSearchResult] = []
+            while let partial = await group.next() {
+                merged.append(contentsOf: partial)
+                if !merged.isEmpty { group.cancelAll() }
+            }
+            return merged
         }
 
-        if results.isEmpty, let variant = Self.searchTitleVariants(query).first {
+        var allResults = results
+        if allResults.isEmpty, let variant = Self.searchTitleVariants(query).first {
             let animeURL = try Self.makeURL(
                 baseURL: baseURL,
                 path: "/api/v2/search/anime",
@@ -365,7 +387,6 @@ public final class DanmuService {
                     from: animeURL.absoluteString,
                     timeout: Self.searchRequestTimeout
                 )
-                hadSuccessfulResponse = true
                 for animeID in Self.findAnimeIDs(in: body).prefix(5) {
                     try Task.checkCancellation()
                     guard let bangumiURL = try? Self.makeURL(
@@ -377,20 +398,14 @@ public final class DanmuService {
                         from: bangumiURL.absoluteString,
                         timeout: Self.searchRequestTimeout
                     ) else { continue }
-                    results.append(contentsOf: Self.parseBuiltinSearchResults(bangumi, baseURL: baseURL))
+                    allResults.append(contentsOf: Self.parseBuiltinSearchResults(bangumi, baseURL: baseURL))
                 }
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                lastError = error
-            }
+            } catch is CancellationError { throw CancellationError() }
+            catch { return [] }
         }
 
         var seen = Set<String>()
-        let uniqueResults = results.filter { seen.insert($0.url).inserted }
-        if uniqueResults.isEmpty, !hadSuccessfulResponse, let lastError {
-            throw lastError
-        }
+        let uniqueResults = allResults.filter { seen.insert($0.url).inserted }
         return uniqueResults
     }
 
@@ -480,7 +495,8 @@ public final class DanmuService {
             useDefault: useDefault,
             saved: Self.firstDefaultValue(keys: [Self.customAPIKey, "danmaku_api", "danmaku"]),
             configured: ApiConfig.shared.danmaku,
-            builtin: Self.builtinAPI
+            builtin: Self.builtinAPI,
+            fallbacks: Self.builtinFallbackAPIs
         )
     }
 
@@ -492,32 +508,39 @@ public final class DanmuService {
         let number = Self.extractNumber(from: episode)
         let queries = number > 0 ? [String(number), ""] : [""]
         let titleVariants = Self.searchTitleVariants(title)
-
-        for titleVariant in titleVariants {
-            for query in queries {
-                try Task.checkCancellation()
-                let searchURL = try Self.makeURL(
-                    baseURL: baseURL,
-                    path: "/api/v2/search/episodes",
-                    queryItems: [
-                        URLQueryItem(name: "anime", value: titleVariant),
-                        query.isEmpty ? nil : URLQueryItem(name: "episode", value: query)
-                    ].compactMap { $0 }
-                )
-                guard let body = try? await getDanmakuText(
-                    from: searchURL.absoluteString,
-                    timeout: Self.searchRequestTimeout
-                ) else {
-                    continue
-                }
-                for match in Self.findEpisodes(in: body, requestedEpisode: episode).prefix(4) {
-                    if let cues = try? await loadComments(baseURL: baseURL, match: match),
-                       !cues.isEmpty {
-                        return cues
+        let requests = titleVariants.flatMap { variant in queries.map { (variant, $0) } }
+        let directCues = await withTaskGroup(of: [DanmuCue].self) { group in
+            for (titleVariant, query) in requests {
+                group.addTask { [weak self] in
+                    guard let self else { return [] }
+                    guard let searchURL = try? Self.makeURL(
+                        baseURL: baseURL,
+                        path: "/api/v2/search/episodes",
+                        queryItems: [
+                            URLQueryItem(name: "anime", value: titleVariant),
+                            query.isEmpty ? nil : URLQueryItem(name: "episode", value: query)
+                        ].compactMap { $0 }
+                    ) else { return [] }
+                    guard let body = try? await self.getDanmakuText(
+                        from: searchURL.absoluteString,
+                        timeout: Self.searchRequestTimeout
+                    ) else { return [] }
+                    let matches = Self.findEpisodes(in: body, requestedEpisode: episode)
+                    return await self.firstNonEmpty(from: matches.prefix(4).map { $0.id }) { id in
+                        guard let match = matches.first(where: { $0.id == id }) else { return [] }
+                        return (try? await self.loadComments(baseURL: baseURL, match: match)) ?? []
                     }
                 }
             }
+            while let cues = await group.next() {
+                if !cues.isEmpty {
+                    group.cancelAll()
+                    return cues
+                }
+            }
+            return []
         }
+        if !directCues.isEmpty { return directCues }
 
         // Some servers return only anime search results from the episodes route.
         let animeURL = try Self.makeURL(
@@ -532,27 +555,23 @@ public final class DanmuService {
             return []
         }
 
-        for animeID in Self.findAnimeIDs(in: animeBody).prefix(4) {
-            try Task.checkCancellation()
-            let bangumiURL = try Self.makeURL(
+        let animeIDs = Self.findAnimeIDs(in: animeBody)
+        return await firstNonEmpty(from: Array(animeIDs.prefix(4))) { [weak self] animeID in
+            guard let self else { return [] }
+            guard let bangumiURL = try? Self.makeURL(
                 baseURL: baseURL,
                 path: "/api/v2/bangumi/\(Self.urlPathEscape(animeID))",
                 queryItems: []
-            )
-            guard let bangumiBody = try? await getDanmakuText(
+            ), let bangumiBody = try? await self.getDanmakuText(
                 from: bangumiURL.absoluteString,
                 timeout: Self.searchRequestTimeout
-            ) else {
-                continue
-            }
-            for match in Self.findEpisodes(in: bangumiBody, requestedEpisode: episode).prefix(4) {
-                if let cues = try? await loadComments(baseURL: baseURL, match: match),
-                   !cues.isEmpty {
-                    return cues
-                }
+            ) else { return [] }
+            let matches = Self.findEpisodes(in: bangumiBody, requestedEpisode: episode)
+            return await self.firstNonEmpty(from: matches.prefix(4).map { $0.id }) { id in
+                guard let match = matches.first(where: { $0.id == id }) else { return [] }
+                return (try? await self.loadComments(baseURL: baseURL, match: match)) ?? []
             }
         }
-        return []
     }
 
     private func loadComments(baseURL: String, match: EpisodeMatch) async throws -> [DanmuCue] {
@@ -718,8 +737,14 @@ public final class DanmuService {
     }
 
     private static func isBuiltinAPI(_ value: String) -> Bool {
-        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return normalized == builtinAPI.lowercased()
+        var normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        while normalized.hasSuffix("/") { normalized.removeLast() }
+        let known = ([builtinAPI] + builtinFallbackAPIs).map {
+            var value = $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            while value.hasSuffix("/") { value.removeLast() }
+            return value
+        }
+        return known.contains(normalized)
             || normalized.hasSuffix("/87654321")
     }
 

@@ -9,24 +9,27 @@ struct VerifyDanmuAPISelection {
             useDefault: false,
             saved: "https://old.example/danmu",
             configured: "https://config.example/danmu",
-            builtin: builtin
-        ) == ["https://old.example/danmu", builtin])
+            builtin: builtin,
+            fallbacks: ["https://saas-oa.shyeguang.cn", "https://api.danmu.icu"]
+        ) == ["https://old.example/danmu", builtin, "https://saas-oa.shyeguang.cn", "https://api.danmu.icu"])
 
         precondition(DanmuAPISelectionPolicy.candidates(
             explicit: nil,
             useDefault: true,
             saved: "https://old.example/danmu",
             configured: "https://config.example/danmu",
-            builtin: builtin
-        ) == [builtin])
+            builtin: builtin,
+            fallbacks: ["https://saas-oa.shyeguang.cn", "https://api.danmu.icu"]
+        ) == [builtin, "https://saas-oa.shyeguang.cn", "https://api.danmu.icu"])
 
         precondition(DanmuAPISelectionPolicy.candidates(
             explicit: " https://custom.example/danmu ",
             useDefault: true,
             saved: nil,
             configured: nil,
-            builtin: builtin
-        ) == ["https://custom.example/danmu", builtin])
+            builtin: builtin,
+            fallbacks: ["https://saas-oa.shyeguang.cn", "https://api.danmu.icu"]
+        ) == ["https://custom.example/danmu", builtin, "https://saas-oa.shyeguang.cn", "https://api.danmu.icu"])
 
         precondition(DanmuAPISelectionPolicy.candidates(
             explicit: builtin,

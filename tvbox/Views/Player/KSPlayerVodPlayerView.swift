@@ -1493,7 +1493,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
         view.toolBar.playbackRateButton.setTitle(nil, for: .normal)
         view.toolBar.playbackRateButton.setImage(UIImage(systemName: "speedometer"), for: .normal)
         view.toolBar.playbackRateButton.tintColor = .white
-        view.toolBar.playbackRateButton.widthAnchor.constraint(equalToConstant: 30).isActive = true
+        view.toolBar.playbackRateButton.widthAnchor.constraint(equalToConstant: 26).isActive = true
         view.toolBar.playbackRateButton.accessibilityLabel = "倍速"
         // Keep the persisted selection visible even before the first ready
         // callback rebuilds KSPlayer's native controls.
@@ -2131,8 +2131,13 @@ private struct KSPlayerUIView: UIViewRepresentable {
                     toolbar.addArrangedSubview(arranged)
                 }
             }
-            toolbar.spacing = 1
-            toolbar.setCustomSpacing(1, after: toolbar.playbackRateButton)
+            // Native KSPlayer uses a horizontal stack. Keep the time label as
+            // the flexible item and reserve fixed, non-overlapping hit areas
+            // for the speed and danmaku controls on narrow landscape phones.
+            toolbar.spacing = 0
+            toolbar.setCustomSpacing(0, after: toolbar.playbackRateButton)
+            toolbar.timeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            toolbar.timeLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
             toolbar.playbackRateButton.setContentCompressionResistancePriority(.required, for: .horizontal)
             episodeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
             danmakuButton.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -2230,7 +2235,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             button.tintColor = .white
             button.accessibilityLabel = label
             button.translatesAutoresizingMaskIntoConstraints = false
-            ensureWidthConstraint(button, constant: 28, relation: .equal)
+            ensureWidthConstraint(button, constant: 24, relation: .equal)
             button.backgroundColor = .clear
             button.layer.backgroundColor = UIColor.clear.cgColor
             button.layer.shadowColor = UIColor.clear.cgColor
@@ -2256,7 +2261,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             button.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
             button.accessibilityLabel = label
             button.translatesAutoresizingMaskIntoConstraints = false
-            ensureWidthConstraint(button, constant: min(width, 34), relation: .equal)
+            ensureWidthConstraint(button, constant: min(width, 32), relation: .equal)
             button.backgroundColor = .clear
             button.layer.backgroundColor = UIColor.clear.cgColor
             button.layer.shadowColor = UIColor.clear.cgColor
@@ -2276,7 +2281,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             button.accessibilityLabel = label
             button.accessibilityHint = "轻点设置当前时间，长按清除标记"
             button.translatesAutoresizingMaskIntoConstraints = false
-            ensureWidthConstraint(button, constant: 48, relation: .greaterThanOrEqual)
+            ensureWidthConstraint(button, constant: 40, relation: .greaterThanOrEqual)
             button.backgroundColor = .clear
             button.layer.backgroundColor = UIColor.clear.cgColor
             button.layer.shadowColor = UIColor.clear.cgColor
