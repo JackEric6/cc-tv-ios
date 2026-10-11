@@ -534,28 +534,6 @@
       ]
     },
     {
-      "key": "yutu",
-      "name": "玉兔",
-      "type": 1,
-      "api": "https://apiyutu.com/api.php/provide/vod/",
-      "searchable": 0,
-      "quickSearch": 0,
-      "changeable": 0,
-      "filterable": 0,
-      "disabled": true,
-      "hidden": true,
-      "timeout": 25,
-      "icon": "https://yutuzy.com/favicon.ico",
-      "home": "https://yutuzy.com/",
-      "help": "https://helpyutu.com/",
-      "backupApi": [
-        "https://apiyutu.com/api.php/Seacms/vod/"
-      ],
-      "backupDomain": [
-        "https://yutuzy1.com/"
-      ]
-    },
-    {
       "key": "guazi",
       "name": "瓜子",
       "type": 1,

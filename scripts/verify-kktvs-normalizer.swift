@@ -69,6 +69,22 @@ struct CmsNormalizerSmokeTest {
             ) == extensionlessPlaylistURL,
             "extensionless nested media URLs were not unwrapped"
         )
+        let ffzyWrapperURL = "https://player.ffzy.test/watch?url=https%3A%2F%2Fmedia.ffzy.test%2Findex.m3u8%3Ftoken%3Dabc"
+        precondition(
+            KktvsResponseNormalizer.embeddedMediaURL(in: ffzyWrapperURL)
+                == "https://media.ffzy.test/index.m3u8?token=abc",
+            "FFZY embedded media URL was not extracted"
+        )
+        precondition(
+            KktvsResponseNormalizer.normalizeMediaURLPreservingWrapper(ffzyWrapperURL) == ffzyWrapperURL,
+            "FFZY player page context was not preserved"
+        )
+        precondition(
+            KktvsResponseNormalizer.embeddedMediaURL(
+                in: "https://player.ffzy.test/watch?url=https%253A%252F%252Fmedia.ffzy.test%252Findex.m3u8"
+            ) == "https://media.ffzy.test/index.m3u8",
+            "double-encoded FFZY media URL was not decoded"
+        )
         precondition(
             KktvsResponseNormalizer.directMediaURL("video://https://media.test/stream.mpd")
                 == "https://media.test/stream.mpd",

@@ -286,10 +286,17 @@ class DetailViewModel: ObservableObject {
         let availableFlags = displayInfo.playFlags.filter {
             !displayInfo.playUrlMap[$0, default: []].isEmpty
         }
+        let sourcePreferredFlag = PlaybackLineSelectionPolicy.preferredFlag(
+            in: availableFlags,
+            sourceKey: source.key,
+            sourceName: source.name,
+            sourceAPI: source.api
+        )
         let advertisedFlag = displayInfo.playFlag.isEmpty
             ? displayInfo.playFlags.first
             : displayInfo.playFlag
-        let safeFlag = advertisedFlag.flatMap { availableFlags.contains($0) ? $0 : nil }
+        let safeFlag = sourcePreferredFlag
+            ?? advertisedFlag.flatMap { availableFlags.contains($0) ? $0 : nil }
             ?? availableFlags.first
             ?? displayInfo.playFlags.first
             ?? ""
@@ -318,7 +325,9 @@ class DetailViewModel: ObservableObject {
         // 续播线路优先由 GuaziService 提前请求；存在历史时直接从该集起播。
         if autoplay {
             let playbackFlag: String
-            if let preferredPlaybackState,
+            if let sourcePreferredFlag {
+                playbackFlag = sourcePreferredFlag
+            } else if let preferredPlaybackState,
                availableFlags.contains(preferredPlaybackState.flag),
                !(displayInfo.playUrlMap[preferredPlaybackState.flag] ?? []).isEmpty {
                 playbackFlag = preferredPlaybackState.flag
@@ -1092,12 +1101,27 @@ class DetailViewModel: ObservableObject {
            GuaziService.PlayRequest(url: url) != nil {
             return url
         }
+        if let source = currentSource,
+           PlaybackLineSelectionPolicy.preservesPlayerPageReferer(
+            sourceKey: source.key,
+            sourceName: source.name,
+            sourceAPI: source.api
+           ) {
+            return KktvsResponseNormalizer.normalizeMediaURLPreservingWrapper(url)
+        }
         return KktvsResponseNormalizer.normalizeMediaURL(url)
     }
 
     private func isDirectPlayableURL(_ url: String, for source: SourceBean) -> Bool {
         if source.key.caseInsensitiveCompare("guazi") == .orderedSame,
            GuaziService.PlayRequest(url: url) != nil {
+            return false
+        }
+        if PlaybackLineSelectionPolicy.preservesPlayerPageReferer(
+            sourceKey: source.key,
+            sourceName: source.name,
+            sourceAPI: source.api
+        ), KktvsResponseNormalizer.embeddedMediaURL(in: url) != nil {
             return false
         }
         return KktvsResponseNormalizer.directMediaURL(url) != nil

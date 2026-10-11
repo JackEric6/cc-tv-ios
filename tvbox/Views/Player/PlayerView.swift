@@ -137,6 +137,7 @@ struct PlayerView: View {
     var outroLabel: String = "片尾"
     var danmakuTitle: String = ""
     var danmakuEpisode: String = ""
+    var displayEpisodeTitle: String = ""
     var danmakuEnabled: Bool = true
     var onDanmakuEnabledChanged: ((Bool) -> Void)? = nil
     var onFullScreenChanged: ((Bool) -> Void)? = nil
@@ -196,6 +197,7 @@ struct PlayerView: View {
                 outroLabel: outroLabel,
                 danmakuTitle: danmakuTitle,
                 danmakuEpisode: danmakuEpisode,
+                displayEpisodeTitle: displayEpisodeTitle,
                 danmakuEnabled: danmakuEnabled,
                 onDanmakuEnabledChanged: onDanmakuEnabledChanged
             )

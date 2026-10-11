@@ -5,11 +5,14 @@ $config = Get-Content -LiteralPath $resourcePath -Raw | ConvertFrom-Json
 $sites = @($config.sites)
 $keys = @($sites | ForEach-Object { $_.key })
 
-if ($sites.Count -ne 47) {
-    throw "源数量错误: $($sites.Count)，预期 47（含瓜子和六个迁移源）"
+if ($sites.Count -ne 46) {
+    throw "源数量错误: $($sites.Count)，预期 46（已移除玉兔源）"
 }
-if (($keys | Select-Object -Unique).Count -ne 47) {
+if (($keys | Select-Object -Unique).Count -ne 46) {
     throw '源 key 不唯一'
+}
+if ('yutu' -in $keys) {
+    throw '玉兔源仍在内置配置中'
 }
 if ($sites[0].key -ne 'xgzy') {
     throw "默认源错误: $($sites[0].key)，预期 xgzy"

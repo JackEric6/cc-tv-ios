@@ -44,8 +44,9 @@ class HomeViewModel: ObservableObject {
     private var initialLoadRetryToken: UUID?
     private var isWaitingForInitialRetry = false
     private var initialLoadRetryAttempt = 0
-    /// 瓜子首屏无内容时临时用西瓜展示；配置中的首选源仍保留为瓜子，刷新可重试。
+    /// 瓜子首屏无内容时临时使用命中的备用源；配置中的首选源仍保留为瓜子，刷新可重试。
     private var fallbackPreferredSourceKey: String?
+    private var fallbackHomeSourceKey: String?
     private let scrollPositionStoragePrefix = "congcong.home.scroll-position."
     /// 仅用户点击标签后才置为 true；渐进加载和冷启动补选不能阻止最终首项收敛。
     private var hasUserSelectedSort = false
@@ -150,7 +151,7 @@ class HomeViewModel: ObservableObject {
             // 这样上层会保留旧内容，下一次刷新仍可重试。
             if allSorts.isEmpty && sourceHomeVideos.isEmpty {
                 if isGuaziSource(source),
-                   await fallbackToXigua(
+                   await fallbackFromGuazi(
                     preferredSource: source,
                     expectedLoadGeneration: requestGeneration,
                     preferredSort: selectedSort
@@ -196,7 +197,7 @@ class HomeViewModel: ObservableObject {
         } catch {
             guard requestGeneration == loadGeneration else { return false }
             if isGuaziSource(source),
-               await fallbackToXigua(
+               await fallbackFromGuazi(
                 preferredSource: source,
                 expectedLoadGeneration: requestGeneration,
                 preferredSort: selectedSort
@@ -425,7 +426,7 @@ class HomeViewModel: ObservableObject {
                   homeSource?.key == source.key else { return }
 
             if page == 1, enrichedVideos.isEmpty, isGuaziSource(source),
-               await fallbackToXigua(
+               await fallbackFromGuazi(
                 preferredSource: source,
                 expectedLoadGeneration: requestGeneration,
                 preferredSort: sort,
@@ -462,7 +463,7 @@ class HomeViewModel: ObservableObject {
                   selectedSort?.id == sort.id,
                   homeSource?.key == source.key else { return }
             if page == 1, isGuaziSource(source),
-               await fallbackToXigua(
+               await fallbackFromGuazi(
                 preferredSource: source,
                 expectedLoadGeneration: requestGeneration,
                 preferredSort: sort,
@@ -504,8 +505,9 @@ class HomeViewModel: ObservableObject {
         refreshInFlight = true
         defer { refreshInFlight = false }
 
-        // 用户刷新时先重试首选源；若瓜子仍无内容，本轮再使用西瓜兜底。
+        // 用户刷新时先重试首选源；若瓜子仍无内容，本轮再依次尝试西瓜和荐片。
         fallbackPreferredSourceKey = nil
+        fallbackHomeSourceKey = nil
         refreshGeneration &+= 1
         let requestGeneration = refreshGeneration
 
@@ -517,7 +519,7 @@ class HomeViewModel: ObservableObject {
         errorMessage = nil
         let sortsLoaded = await loadSorts()
         guard requestGeneration == refreshGeneration, sortsLoaded else { return }
-        // loadSorts 可能已完成瓜子->西瓜兜底，保留其有效首屏，避免紧接着重复请求并覆盖。
+        // loadSorts 可能已完成瓜子->备用源兜底，保留其有效首屏，避免紧接着重复请求并覆盖。
         if fallbackPreferredSourceKey != nil, !categoryVideos.isEmpty {
             return
         }
@@ -539,7 +541,7 @@ class HomeViewModel: ObservableObject {
             guard requestGeneration == refreshGeneration else { return }
 
             if enrichedVideos.isEmpty, isGuaziSource(source),
-               await fallbackToXigua(
+               await fallbackFromGuazi(
                 preferredSource: source,
                 expectedLoadGeneration: loadGeneration,
                 expectedRefreshGeneration: requestGeneration,
@@ -561,7 +563,7 @@ class HomeViewModel: ObservableObject {
             guard requestGeneration == refreshGeneration else { return }
             if let source = homeSource,
                isGuaziSource(source),
-               await fallbackToXigua(
+               await fallbackFromGuazi(
                 preferredSource: source,
                 expectedLoadGeneration: loadGeneration,
                 expectedRefreshGeneration: requestGeneration,
@@ -580,9 +582,8 @@ class HomeViewModel: ObservableObject {
         }
     }
 
-    /// 仅在瓜子失败或首屏分类为空时，加载西瓜自己的分类与首屏列表。
-    /// 成功后用临时覆盖源驱动后续分页和详情，刷新则清除此标记重试瓜子。
-    private func fallbackToXigua(
+    /// 瓜子不可用时依次尝试西瓜、荐片；刷新会清除此覆盖并重试瓜子。
+    private func fallbackFromGuazi(
         preferredSource: SourceBean,
         expectedLoadGeneration: Int,
         expectedRefreshGeneration: Int? = nil,
@@ -590,11 +591,18 @@ class HomeViewModel: ObservableObject {
         expectedSelectedSortID: String? = nil
     ) async -> Bool {
         guard isGuaziSource(preferredSource),
-              fallbackPreferredSourceKey?.caseInsensitiveCompare(preferredSource.key) != .orderedSame,
-              let xigua = ApiConfig.shared.sourceBeanList.first(where: isXiguaSource),
-              xigua.isSelectable else {
+              fallbackPreferredSourceKey?.caseInsensitiveCompare(preferredSource.key) != .orderedSame else {
             return false
         }
+
+        let config = ApiConfig.shared
+        let fallbackSources = [SearchSourceGroup.xigua, .jianpian].compactMap { group in
+            config.sourceBeanList.first(where: {
+                SearchSourceGroup.classify(sourceKey: $0.key, sourceName: $0.name) == group
+                    && $0.isSelectable
+            })
+        }
+        guard !fallbackSources.isEmpty else { return false }
 
         func isCurrentRequest() -> Bool {
             guard loadGeneration == expectedLoadGeneration,
@@ -610,82 +618,87 @@ class HomeViewModel: ObservableObject {
             return true
         }
 
-        do {
-            let result = try await sourceService.getSort(sourceBean: xigua)
+        let preferredName = preferredSort.map { normalizedCategoryName($0.name) } ?? ""
+        for fallbackSource in fallbackSources {
             guard isCurrentRequest() else { return false }
-            let xiguaSorts = visibleChildSorts(result.sorts, source: xigua)
-            guard !xiguaSorts.isEmpty else { return false }
-            let preferredName = preferredSort.map { normalizedCategoryName($0.name) } ?? ""
-            let matchingSort = xiguaSorts.first { sort in
-                let name = normalizedCategoryName(sort.name)
-                if name == preferredName { return true }
-                if ["电视剧", "连续剧"].contains(preferredName) {
-                    return ["国产剧", "大陆剧", "内地剧"].contains(name)
-                }
-                if preferredName == "动漫" {
-                    return name.contains("动漫") || name.contains("动画")
-                }
-                return false
-            }
-            let orderedSorts = matchingSort.map { match in
-                [match] + xiguaSorts.filter { $0.id != match.id }
-            } ?? xiguaSorts
-
-            var firstSortWithVideos: MovieSort.SortData?
-            var videos: [Movie.Video] = []
-            for sort in orderedSorts.prefix(8) {
+            do {
+                let result = try await sourceService.getSort(sourceBean: fallbackSource)
                 guard isCurrentRequest() else { return false }
-                let rawVideos: [Movie.Video]
-                do {
-                    rawVideos = try await sourceService.getList(
-                        sourceBean: xigua,
-                        sortData: sort,
-                        page: 1
-                    )
-                } catch {
-                    if error.isNetworkConnectionError {
+                let fallbackSorts = visibleChildSorts(result.sorts, source: fallbackSource)
+                guard !fallbackSorts.isEmpty else { continue }
+                let matchingSort = fallbackSorts.first { sort in
+                    let name = normalizedCategoryName(sort.name)
+                    if name == preferredName { return true }
+                    if ["电视剧", "连续剧"].contains(preferredName) {
+                        return ["国产剧", "大陆剧", "内地剧"].contains(name)
+                    }
+                    if preferredName == "动漫" {
+                        return name.contains("动漫") || name.contains("动画")
+                    }
+                    return false
+                }
+                let orderedSorts = matchingSort.map { match in
+                    [match] + fallbackSorts.filter { $0.id != match.id }
+                } ?? fallbackSorts
+
+                var firstSortWithVideos: MovieSort.SortData?
+                var videos: [Movie.Video] = []
+                for sort in orderedSorts.prefix(8) {
+                    guard isCurrentRequest() else { return false }
+                    let rawVideos: [Movie.Video]
+                    do {
+                        rawVideos = try await sourceService.getList(
+                            sourceBean: fallbackSource,
+                            sortData: sort,
+                            page: 1
+                        )
+                    } catch {
+                        if error.isNetworkConnectionError {
+                            break
+                        }
+                        continue
+                    }
+                    let filteredVideos = strictCategoryVideos(rawVideos, for: sort, source: fallbackSource)
+                    guard !filteredVideos.isEmpty else { continue }
+                    let cachedVideos = await PosterCache.shared.fill(filteredVideos)
+                    videos = cachedVideos.map { video in
+                        var boundVideo = video
+                        boundVideo.sourceKey = fallbackSource.key
+                        return boundVideo
+                    }
+                    if !videos.isEmpty {
+                        firstSortWithVideos = sort
                         break
                     }
-                    continue
                 }
-                let filteredVideos = strictCategoryVideos(rawVideos, for: sort, source: xigua)
-                guard !filteredVideos.isEmpty else { continue }
-                let cachedVideos = await PosterCache.shared.fill(filteredVideos)
-                videos = cachedVideos.map { video in
+                guard isCurrentRequest() else { return false }
+                guard let firstSort = firstSortWithVideos, !videos.isEmpty else { continue }
+
+                fallbackPreferredSourceKey = preferredSource.key
+                fallbackHomeSourceKey = fallbackSource.key
+                sorts = fallbackSorts
+                homeVideos = result.homeVideos.map { video in
                     var boundVideo = video
-                    boundVideo.sourceKey = xigua.key
+                    boundVideo.sourceKey = fallbackSource.key
                     return boundVideo
                 }
-                if !videos.isEmpty {
-                    firstSortWithVideos = sort
-                    break
-                }
+                selectedSort = firstSort
+                categoryVideos = videos
+                didCompleteInitialSortLoad = true
+                didLoadInitialContent = true
+                initialLoadRetryAttempt = 0
+                currentPage = 1
+                hasMore = true
+                errorMessage = nil
+                lastLoadFailedDueToNetwork = false
+                cancelInitialLoadRetry()
+                return true
+            } catch {
+                guard isCurrentRequest() else { return false }
+                continue
             }
-            guard isCurrentRequest(), let firstSort = firstSortWithVideos, !videos.isEmpty else {
-                return false
-            }
-
-            fallbackPreferredSourceKey = preferredSource.key
-            sorts = xiguaSorts
-            homeVideos = result.homeVideos.map { video in
-                var boundVideo = video
-                boundVideo.sourceKey = xigua.key
-                return boundVideo
-            }
-            selectedSort = firstSort
-            categoryVideos = videos
-            didCompleteInitialSortLoad = true
-            didLoadInitialContent = true
-            initialLoadRetryAttempt = 0
-            currentPage = 1
-            hasMore = true
-            errorMessage = nil
-            lastLoadFailedDueToNetwork = false
-            cancelInitialLoadRetry()
-            return true
-        } catch {
-            return false
         }
+        return false
     }
 
     private func clearFallbackIfPreferredSourceChanged() {
@@ -693,6 +706,7 @@ class HomeViewModel: ObservableObject {
         let selectedKey = ApiConfig.shared.homeSourceBean?.key
         if selectedKey?.caseInsensitiveCompare(fallbackPreferredSourceKey) != .orderedSame {
             self.fallbackPreferredSourceKey = nil
+            self.fallbackHomeSourceKey = nil
         }
     }
 
@@ -792,19 +806,20 @@ class HomeViewModel: ObservableObject {
             .map(\.element)
     }
 
-    /// 默认使用瓜子；失败回退期间临时使用西瓜并保留正确的播放源身份。
+    /// 默认使用瓜子；失败回退期间临时使用命中的备用源并保留正确的播放源身份。
     private var homeSource: SourceBean? {
         let config = ApiConfig.shared
         if let preferredKey = config.homeSourceBean?.key,
            fallbackPreferredSourceKey?.caseInsensitiveCompare(preferredKey) == .orderedSame,
-           let xigua = config.sourceBeanList.first(where: isXiguaSource),
-           xigua.isSelectable {
-            return xigua
+           let fallbackHomeSourceKey,
+           let fallbackSource = config.sourceBeanList.first(where: {
+               $0.key.caseInsensitiveCompare(fallbackHomeSourceKey) == .orderedSame
+                   && $0.isSelectable
+           }) {
+            return fallbackSource
         }
         if let selectedSource = config.homeSourceBean {
-            let key = selectedSource.key.lowercased()
-            if (key == "yutu" && config.isYutuUnlocked)
-                || key == "guazi" {
+            if selectedSource.isSelectable {
                 return selectedSource
             }
         }

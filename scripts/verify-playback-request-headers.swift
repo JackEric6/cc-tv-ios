@@ -19,9 +19,11 @@ struct VerifyPlaybackRequestHeaders {
 
         let xintongHeaders = PlaybackRequestHeaderPolicy.applyingCMSPlaybackHeaders(
             to: ["User-Agent": PlaybackRequestHeaderPolicy.androidDefaultUserAgent],
-            sourceKey: "fhw88"
+            sourceKey: "custom-xintong",
+            sourceAPI: "https://cj.ffzyapi.com/api.php/provide/vod/"
         )
         precondition(xintongHeaders["Referer"] == "https://ffzy5.tv/")
+        precondition(xintongHeaders["User-Agent"] == PlaybackRequestHeaderPolicy.androidCMSPlaybackUserAgent)
 
         let sharedPageHeaders = PlaybackRequestHeaderPolicy.applyingRefererOverride(
             "https://vip.ffzy-plays.com/share/303d834ae7ba59a8233f9b0bd60998fe",
@@ -36,6 +38,13 @@ struct VerifyPlaybackRequestHeaders {
         )
         precondition(xiguaHeaders["Referer"] == "https://xgzy.tv/")
         precondition(xiguaHeaders["User-Agent"] == PlaybackRequestHeaderPolicy.androidCMSPlaybackUserAgent)
+        precondition(
+            PlaybackRequestHeaderPolicy.mediaRefererOverride(
+                sourceKey: "custom-feifan",
+                sourceAPI: "https://api.ffzyapi.com/api.php/provide/vod/",
+                mediaURL: "https://cdn.ffzy.test/index.m3u8"
+            ) == "https://ffzy5.tv/"
+        )
         precondition(
             PlaybackRequestHeaderPolicy.mediaRefererOverride(
                 sourceKey: "xgzy",

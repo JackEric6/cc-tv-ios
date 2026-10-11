@@ -32,17 +32,9 @@ struct VodCardView: View {
             // 封面图
             ZStack(alignment: .bottomLeading) {
                 CachedAsyncImage(url: URL.posterURL(from: video.pic)) { image in
-                    if usesYutuPosterLayout {
-                        image
-                            .resizable()
-                            // 玉兔部分海报返回的原始比例不一致；填充固定卡片比例，
-                            // 保持宽高比并裁掉多余边缘，避免海报缩成卡片内的小图。
-                            .aspectRatio(2 / 3, contentMode: .fill)
-                    } else {
-                        image
-                            .resizable()
-                            .aspectRatio(2/3, contentMode: .fill)
-                    }
+                    image
+                        .resizable()
+                        .aspectRatio(2/3, contentMode: .fill)
                 } placeholder: {
                     placeholderImage
                         .overlay(ProgressView().tint(.white))
@@ -103,7 +95,6 @@ struct VodCardView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 }
             }
-            .modifier(SourceSpecificPosterFrame(isYutu: usesYutuPosterLayout))
             // 悬停缩放只增强视觉反馈，不影响点击命中区域。
             .scaleEffect(isHovered ? 1.05 : 1.0)
             .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isHovered)
@@ -132,10 +123,6 @@ struct VodCardView: View {
         #endif
     }
 
-    private var usesYutuPosterLayout: Bool {
-        video.sourceKey.caseInsensitiveCompare("yutu") == .orderedSame
-    }
-    
     /// 海报占位图，避免图片加载失败导致卡片高度塌陷。
     private var placeholderImage: some View {
         RoundedRectangle(cornerRadius: AppTheme.cardRadius)
@@ -146,21 +133,5 @@ struct VodCardView: View {
                     .font(.system(size: 30))
                     .foregroundColor(.white.opacity(0.2))
             )
-    }
-}
-
-private struct SourceSpecificPosterFrame: ViewModifier {
-    let isYutu: Bool
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if isYutu {
-            content
-                .frame(maxWidth: .infinity)
-                .aspectRatio(2/3, contentMode: .fill)
-                .clipped()
-        } else {
-            content
-        }
     }
 }

@@ -307,8 +307,9 @@ jobs:
           source_config = Path("tvbox/Resources/xgzy_config_all.json")
           import json
           sources = json.loads(source_config.read_text(encoding="utf-8"))["sites"]
-          assert len(sources) == 47
-          assert len({item["key"] for item in sources}) == 47
+          assert len(sources) == 46
+          assert len({item["key"] for item in sources}) == 46
+          assert all(item["key"] != "yutu" for item in sources)
           expected_search_sources = {
               "guazi", "jianpian", "xgzy", "ffzy", "bfzy", "dyttzy",
               "lzi", "360zy", "fhw88", "cz4k", "fan_moli", "ikanbot", "zanpian",

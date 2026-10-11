@@ -14,6 +14,7 @@ enum PlaybackRequestHeaderPolicy {
         "suboziyuan": "https://www.suboziyuan.net/",
         "haohua": "https://haohuazy.com/",
         "fhw88": "https://ffzy5.tv/",
+        "xintong": "https://ffzy5.tv/",
         "ffzy": "https://ffzy5.tv/",
         "lzi": "https://lzizy.net/",
         "sony": "https://suonizy.net/",
@@ -67,7 +68,8 @@ enum PlaybackRequestHeaderPolicy {
 
     static func applyingCMSPlaybackHeaders(
         to headers: [String: String],
-        sourceKey: String
+        sourceKey: String,
+        sourceAPI: String? = nil
     ) -> [String: String] {
         let key = sourceKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var result = headers
@@ -76,9 +78,11 @@ enum PlaybackRequestHeaderPolicy {
         result.keys.filter { $0.caseInsensitiveCompare("User-Agent") == .orderedSame }
             .forEach { result.removeValue(forKey: $0) }
         result["User-Agent"] = androidCMSPlaybackUserAgent
-        // Match Android playback headers: CMS endpoint Referer mappings belong
-        // to catalog requests and must not be copied to media CDN requests.
-        if let referer = cmsSourceReferers[key] {
+        // Apply only explicit playback-origin mappings; do not infer a Referer for unknown sources.
+        let sourceHost = sourceAPI.flatMap { URLComponents(string: $0)?.host?.lowercased() }
+        let referer = cmsSourceReferers[key]
+            ?? (sourceHost == "api.ffzyapi.com" || sourceHost == "cj.ffzyapi.com" ? "https://ffzy5.tv/" : nil)
+        if let referer {
             result["Referer"] = referer
         }
         return result
@@ -119,11 +123,21 @@ enum PlaybackRequestHeaderPolicy {
         return referer.url?.absoluteString
     }
 
-    static func mediaRefererOverride(sourceKey: String, mediaURL: String) -> String? {
-        guard isXiguaSource(sourceKey) else {
-            return nil
+    static func mediaRefererOverride(
+        sourceKey: String,
+        sourceAPI: String? = nil,
+        mediaURL: String
+    ) -> String? {
+        if isXiguaSource(sourceKey) {
+            return xiguaMediaReferer(for: mediaURL)
         }
-        return xiguaMediaReferer(for: mediaURL)
+        let key = sourceKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let apiHost = sourceAPI.flatMap { URLComponents(string: $0)?.host?.lowercased() }
+        if ["fhw88", "xintong", "ffzy", "feifan", "feifazy"].contains(key)
+            || apiHost == "api.ffzyapi.com" || apiHost == "cj.ffzyapi.com" {
+            return "https://ffzy5.tv/"
+        }
+        return nil
     }
 
     static func applyingSourceSpecificPlaybackHeaders(

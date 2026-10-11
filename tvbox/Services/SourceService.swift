@@ -568,6 +568,25 @@ class SourceService {
             return ResolvedPlaybackMedia(url: playableURL, headers: GuaziPlaybackRequest.playbackHeaders)
         }
 
+        if PlaybackLineSelectionPolicy.preservesPlayerPageReferer(
+            sourceKey: sourceBean.key,
+            sourceName: sourceBean.name,
+            sourceAPI: sourceBean.api
+        ), let embeddedURL = KktvsResponseNormalizer.embeddedMediaURL(in: url) {
+            let wrapperReferer = URLComponents(string: url).flatMap { components -> String? in
+                var referer = components
+                referer.fragment = nil
+                return referer.url?.absoluteString
+            } ?? url
+            return try await resolvePlaybackPage(
+                sourceBean: sourceBean,
+                url: embeddedURL,
+                visited: [],
+                remainingPageHops: 3,
+                parentPageURL: wrapperReferer
+            )
+        }
+
         if sourceBean.key.caseInsensitiveCompare("cz4k") == .orderedSame,
            let browserResolved = try await Cz4kSourceService.resolvePlaybackMedia(
             from: url,
@@ -991,7 +1010,8 @@ class SourceService {
         if PlaybackRequestHeaderPolicy.appliesToCMSPlayback(sourceType: sourceBean.type) {
             headers = PlaybackRequestHeaderPolicy.applyingCMSPlaybackHeaders(
                 to: headers,
-                sourceKey: sourceBean.key
+                sourceKey: sourceBean.key,
+                sourceAPI: sourceBean.api
             )
         }
         headers = PlaybackRequestHeaderPolicy.applyingSourceSpecificPlaybackHeaders(
@@ -1014,6 +1034,7 @@ class SourceService {
         let inheritedReferer = refererOverride
             ?? PlaybackRequestHeaderPolicy.mediaRefererOverride(
                 sourceKey: sourceBean.key,
+                sourceAPI: sourceBean.api,
                 mediaURL: mediaURL
             )
         return PlaybackRequestHeaderPolicy.applyingRefererOverride(inheritedReferer, to: headers)
@@ -1080,8 +1101,8 @@ class SourceService {
         let urls = playUrl.components(separatedBy: "$$$")
 
         // 某些 CMS 将解析页线路放在第一条、直链 m3u8 放在后面。
-        // 先稳定地把可直接播放或可提取媒体的线路排前，避免详情页默认
-        // 选择一个只能在网页中播放的地址。相同优先级保持源站顺序。
+        // 非凡和鑫同优先使用各自的 ffm3u8 线路；缺失时保留其他线路作回退。
+        // 其余源按直链优先排序，相同优先级保持源站顺序。
         var paired = flags.indices.compactMap { index -> (flag: String, url: String, index: Int)? in
             guard urls.indices.contains(index) else { return nil }
             let flag = flags[index].trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1090,8 +1111,14 @@ class SourceService {
             return (flag, url, index)
         }
 
-        // 这些源同时返回网页解析线路和 m3u8 线路。点播端按安卓配置只保留
-        // 指定的稳定线路，并始终从同一条记录取 flag 与 URL，避免串线。
+        let preferredFlag = PlaybackLineSelectionPolicy.preferredFlagSubstring(
+            sourceKey: sourceBean.key,
+            sourceName: sourceBean.name,
+            sourceAPI: sourceBean.api
+        )
+
+        // 特定来源要求固定线路时，仅在响应确实提供该线路的情况下过滤；
+        // flag 与 URL 始终作为一组处理，避免串线。
         if let requiredFlag = requiredPlaybackFlag(for: sourceBean) {
             let matching = paired.filter {
                 $0.flag.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1100,6 +1127,9 @@ class SourceService {
             if !matching.isEmpty { paired = matching }
         }
         let ordered = paired.sorted { lhs, rhs in
+            let leftPreferred = preferredFlag.map { lhs.flag.localizedCaseInsensitiveContains($0) } ?? false
+            let rightPreferred = preferredFlag.map { rhs.flag.localizedCaseInsensitiveContains($0) } ?? false
+            if leftPreferred != rightPreferred { return leftPreferred }
             let leftPriority = playbackLinePriority(lhs.url)
             let rightPriority = playbackLinePriority(rhs.url)
             if leftPriority != rightPriority { return leftPriority < rightPriority }

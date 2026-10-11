@@ -37,6 +37,7 @@ struct KSPlayerVodPlayerView: View {
     var outroLabel: String = "片尾"
     var danmakuTitle: String = ""
     var danmakuEpisode: String = ""
+    var displayEpisodeTitle: String = ""
     var danmakuEnabled: Bool = true
     var onDanmakuEnabledChanged: ((Bool) -> Void)? = nil
     /// Forwards native toolbar actions to the host without replacing KSPlayer's handling.
@@ -69,6 +70,7 @@ struct KSPlayerVodPlayerView: View {
                 outroLabel: outroLabel,
                 danmakuTitle: danmakuTitle,
                 danmakuEpisode: danmakuEpisode,
+                displayEpisodeTitle: displayEpisodeTitle,
                 danmakuEnabled: danmakuEnabled,
                 onDanmakuEnabledChanged: onDanmakuEnabledChanged
             )
@@ -1287,6 +1289,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
     let outroLabel: String
     let danmakuTitle: String
     let danmakuEpisode: String
+    let displayEpisodeTitle: String
     let danmakuEnabled: Bool
     let onDanmakuEnabledChanged: ((Bool) -> Void)?
 
@@ -1311,6 +1314,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             outroLabel: outroLabel,
             danmakuTitle: danmakuTitle,
             danmakuEpisode: danmakuEpisode,
+            displayEpisodeTitle: displayEpisodeTitle,
             danmakuEnabled: danmakuEnabled,
             onDanmakuEnabledChanged: onDanmakuEnabledChanged
         )
@@ -1379,7 +1383,11 @@ private struct KSPlayerUIView: UIViewRepresentable {
         coordinator.onResetIntro = onResetIntro
         coordinator.onResetOutro = onResetOutro
         coordinator.updateMarkerLabels(intro: introLabel, outro: outroLabel)
-        coordinator.updateDanmakuMetadata(title: danmakuTitle, episode: danmakuEpisode)
+        coordinator.updateDanmakuMetadata(
+            title: danmakuTitle,
+            episode: danmakuEpisode,
+            displayEpisodeTitle: displayEpisodeTitle
+        )
         coordinator.updateDanmakuEnabled(danmakuEnabled)
         coordinator.onDanmakuEnabledChanged = onDanmakuEnabledChanged
         view.onPlaybackFailure = { [weak coordinator] in
@@ -1510,8 +1518,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
         coordinator.installDanmaku(on: view)
         view.playTimeDidChange = { [weak coordinator] current, total in
             guard let coordinator else { return }
-            coordinator.updateDanmakuTime(currentTime: current, duration: total > 0 ? total : 0)
-            coordinator.onProgressChanged?(current, total > 0 ? total : nil)
+            coordinator.updatePlaybackTimeline(currentTime: current, duration: total)
         }
     }
 
@@ -1521,6 +1528,11 @@ private struct KSPlayerUIView: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, PlayerControllerDelegate {
+        private struct PendingDanmakuSeek {
+            let target: TimeInterval
+            let startedAt: TimeInterval
+        }
+
         var url: URL?
         var playbackHeaders: [String: String] = [:]
         var playbackSessionToken: UUID?
@@ -1540,6 +1552,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
         var onDanmakuEnabledChanged: ((Bool) -> Void)?
         private var danmakuTitle: String
         private var danmakuEpisode: String
+        private var displayEpisodeTitle: String
         private var danmakuEnabled: Bool
         private var danmakuSettings = DanmakuDisplaySettings.load()
         private var danmakuStatusText = "准备搜索弹幕"
@@ -1561,6 +1574,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
         private var danmakuResultRequestID = UUID()
         private var lastPlayerTime: TimeInterval = 0
         private var lastPlayerDuration: TimeInterval = 0
+        private var pendingDanmakuSeek: PendingDanmakuSeek?
         private var didReportPlaybackFailure = false
         private let previousButton = UIButton(type: .system)
         private let rewindButton = UIButton(type: .system)
@@ -1609,6 +1623,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             outroLabel: String,
             danmakuTitle: String,
             danmakuEpisode: String,
+            displayEpisodeTitle: String,
             danmakuEnabled: Bool,
             onDanmakuEnabledChanged: ((Bool) -> Void)?
         ) {
@@ -1628,6 +1643,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             self.outroLabel = outroLabel
             self.danmakuTitle = danmakuTitle
             self.danmakuEpisode = danmakuEpisode
+            self.displayEpisodeTitle = displayEpisodeTitle
             self.danmakuEnabled = danmakuEnabled
             self.onDanmakuEnabledChanged = onDanmakuEnabledChanged
             danmakuSettings.enabled = danmakuEnabled
@@ -1641,13 +1657,16 @@ private struct KSPlayerUIView: UIViewRepresentable {
             }
         }
 
-        func updateDanmakuMetadata(title: String, episode: String) {
+        func updateDanmakuMetadata(title: String, episode: String, displayEpisodeTitle: String) {
             let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
             let normalizedEpisode = episode.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard normalizedTitle != danmakuTitle || normalizedEpisode != danmakuEpisode else { return }
+            let normalizedDisplayEpisode = displayEpisodeTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            let metadataChanged = normalizedTitle != danmakuTitle || normalizedEpisode != danmakuEpisode
             danmakuTitle = normalizedTitle
             danmakuEpisode = normalizedEpisode
-            playerView?.titleLabel.text = normalizedTitle
+            self.displayEpisodeTitle = normalizedDisplayEpisode
+            updatePlayerTitle()
+            guard metadataChanged else { return }
             loadedDanmakuKey = nil
             cancelDanmakuRetry(resetAttempts: true)
             invalidateDanmakuLoad()
@@ -1660,6 +1679,15 @@ private struct KSPlayerUIView: UIViewRepresentable {
             setDanmakuStatus("正在搜索弹幕")
             guard let danmakuView else { return }
             loadDanmaku(into: danmakuView)
+        }
+
+        private func updatePlayerTitle() {
+            let title = danmakuTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard isLandscape, !displayEpisodeTitle.isEmpty else {
+                playerView?.titleLabel.text = title
+                return
+            }
+            playerView?.titleLabel.text = "\(title) \(displayEpisodeTitle)"
         }
 
         func updateDanmakuEnabled(_ enabled: Bool) {
@@ -1739,6 +1767,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
         }
 
         func tearDownDanmaku() {
+            pendingDanmakuSeek = nil
             invalidateDanmakuLoad()
             danmakuSearchTask?.cancel()
             danmakuSearchTask = nil
@@ -2114,8 +2143,8 @@ private struct KSPlayerUIView: UIViewRepresentable {
             canSelectEpisode: Bool
         ) {
             playerView = view
-            view.titleLabel.text = danmakuTitle
             view.titleLabel.textColor = .white
+            updatePlayerTitle()
             configureButton(previousButton, imageName: "backward.end", label: "上一集", action: #selector(previousPressed), weight: .light)
             configureButton(rewindButton, imageName: "gobackward.15", label: "后退15秒", action: #selector(rewindPressed))
             configureButton(forwardButton, imageName: "goforward.15", label: "前进15秒", action: #selector(forwardPressed))
@@ -2123,6 +2152,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             configureButton(verticalRewindButton, imageName: "gobackward.15", label: "后退15秒", action: #selector(rewindPressed))
             configureButton(verticalForwardButton, imageName: "goforward.15", label: "前进15秒", action: #selector(forwardPressed))
             configureButton(volumeButton, imageName: "speaker.wave.2", label: "音量", action: #selector(volumePressed), weight: .light)
+            setVolumeButtonIcon(isMuted: view.volumeViewSlider.value <= 0.02)
             configureButton(episodeButton, imageName: "list.bullet", label: "选集", action: #selector(selectEpisodePressed))
             configureTextButton(danmakuButton, title: "弹幕", width: 40, label: "弹幕设置", action: #selector(danmakuPressed))
             configureMarkerButton(introButton, title: introLabel, label: "标记片头", action: #selector(markIntroPressed), resetAction: #selector(resetIntroPressed))
@@ -2183,11 +2213,9 @@ private struct KSPlayerUIView: UIViewRepresentable {
                     toolbar.addArrangedSubview(arranged)
                 }
             }
-            // Native KSPlayer uses a horizontal stack. Keep the time label as
-            // the flexible item and reserve fixed, non-overlapping hit areas
-            // for the speed and danmaku controls on narrow landscape phones.
-            toolbar.spacing = 0
-            toolbar.setCustomSpacing(0, after: toolbar.playbackRateButton)
+            // Keep small gaps between controls while leaving the time label as
+            // the only flexible item in the narrow inline toolbar.
+            toolbar.spacing = 4
             toolbar.timeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             toolbar.timeLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
             toolbar.playbackRateButton.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -2218,6 +2246,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
 
         func updateActionButtonsLayout(isLandscape: Bool) {
             self.isLandscape = isLandscape
+            updatePlayerTitle()
             // 剧集导航只在横屏显示；横屏固定占位，避免集数变化时控制栏横向跳动。
             previousButton.isHidden = !isLandscape
             nextButton.isHidden = !isLandscape
@@ -2330,10 +2359,13 @@ private struct KSPlayerUIView: UIViewRepresentable {
             button.setTitle(title, for: .normal)
             button.setTitleColor(.white, for: .normal)
             button.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
+            button.titleLabel?.adjustsFontSizeToFitWidth = true
+            button.titleLabel?.minimumScaleFactor = 0.7
+            button.titleLabel?.lineBreakMode = .byClipping
             button.accessibilityLabel = label
             button.accessibilityHint = "轻点设置当前时间，长按清除标记"
             button.translatesAutoresizingMaskIntoConstraints = false
-            ensureWidthConstraint(button, constant: 40, relation: .greaterThanOrEqual)
+            ensureWidthConstraint(button, constant: 48, relation: .equal)
             button.backgroundColor = .clear
             button.layer.backgroundColor = UIColor.clear.cgColor
             button.layer.shadowColor = UIColor.clear.cgColor
@@ -2423,9 +2455,14 @@ private struct KSPlayerUIView: UIViewRepresentable {
             let slider = playerView.volumeViewSlider
             let newVolume = volumeButtonState.toggle(currentVolume: slider.value)
             slider.setValue(newVolume, animated: false)
-            let image = newVolume <= 0.02 ? "speaker.slash.fill" : "speaker.wave.2.fill"
-            volumeButton.setImage(UIImage(systemName: image), for: .normal)
+            setVolumeButtonIcon(isMuted: newVolume <= 0.02)
             slider.sendActions(for: .valueChanged)
+        }
+
+        private func setVolumeButtonIcon(isMuted: Bool) {
+            let symbol = isMuted ? "speaker.slash" : "speaker.wave.2"
+            let configuration = UIImage.SymbolConfiguration(pointSize: 16, weight: .light)
+            volumeButton.setImage(UIImage(systemName: symbol, withConfiguration: configuration), for: .normal)
         }
 
         func playerController(state _: KSPlayerState) {
@@ -2433,8 +2470,13 @@ private struct KSPlayerUIView: UIViewRepresentable {
         }
 
         func playerController(currentTime: TimeInterval, totalTime: TimeInterval) {
-            updateDanmakuTime(currentTime: currentTime, duration: totalTime)
-            onProgressChanged?(currentTime, totalTime > 0 ? totalTime : nil)
+            updatePlaybackTimeline(currentTime: currentTime, duration: totalTime)
+        }
+
+        func updatePlaybackTimeline(currentTime: TimeInterval, duration: TimeInterval) {
+            let updatedDanmaku = updateDanmakuTime(currentTime: currentTime, duration: duration)
+            let reportedTime = updatedDanmaku ? currentTime : estimatedPostSeekTime() ?? currentTime
+            onProgressChanged?(reportedTime, duration > 0 ? duration : nil)
         }
 
         func playerController(finish error: Error?) {
@@ -2473,17 +2515,65 @@ private struct KSPlayerUIView: UIViewRepresentable {
         func playerController(bufferedCount _: Int, consumeTime _: TimeInterval) {}
 
         func playerController(seek time: TimeInterval) {
-            // update() detects the discontinuity and rebuilds the visible window
-            // atomically. A separate reset here briefly removes every cue and
-            // causes a visible flash while the progress bar is released.
-            updateDanmakuTime(currentTime: time, duration: lastPlayerDuration)
+            updateDanmakuTime(
+                currentTime: time,
+                duration: lastPlayerDuration,
+                isSeek: true
+            )
         }
 
-        func updateDanmakuTime(currentTime: TimeInterval, duration: TimeInterval) {
-            lastPlayerTime = max(0, currentTime.isFinite ? currentTime : 0)
-            lastPlayerDuration = max(0, duration.isFinite ? duration : 0)
+        @discardableResult
+        func updateDanmakuTime(
+            currentTime: TimeInterval,
+            duration: TimeInterval,
+            isSeek: Bool = false
+        ) -> Bool {
+            let boundedTime = max(0, currentTime.isFinite ? currentTime : 0)
+            let boundedDuration = max(0, duration.isFinite ? duration : 0)
+            if isSeek {
+                pendingDanmakuSeek = PendingDanmakuSeek(
+                    target: boundedTime,
+                    startedAt: ProcessInfo.processInfo.systemUptime
+                )
+            } else if shouldIgnoreStaleTimeAfterSeek(boundedTime) {
+                if boundedDuration > 0 { lastPlayerDuration = boundedDuration }
+                return false
+            }
+
+            lastPlayerTime = boundedTime
+            lastPlayerDuration = boundedDuration
             updateDanmakuPlaybackActivity()
-            danmakuView?.update(currentTime: lastPlayerTime, duration: lastPlayerDuration, playbackRate: currentPlaybackRate)
+            danmakuView?.update(
+                currentTime: lastPlayerTime,
+                duration: lastPlayerDuration,
+                playbackRate: currentPlaybackRate,
+                forceTimelineSync: isSeek
+            )
+            return true
+        }
+
+        private func shouldIgnoreStaleTimeAfterSeek(_ currentTime: TimeInterval) -> Bool {
+            guard let pendingDanmakuSeek else { return false }
+            let elapsed = max(0, ProcessInfo.processInfo.systemUptime - pendingDanmakuSeek.startedAt)
+            guard elapsed < 2.5 else {
+                self.pendingDanmakuSeek = nil
+                return false
+            }
+
+            let expectedTime = pendingDanmakuSeek.target
+                + elapsed * DanmakuTimelinePolicy.playbackRate(currentPlaybackRate)
+            let matchesTarget = abs(currentTime - pendingDanmakuSeek.target) <= 1.25
+            let matchesRunningTimeline = abs(currentTime - expectedTime) <= 1.25
+            guard matchesTarget || matchesRunningTimeline else { return true }
+            self.pendingDanmakuSeek = nil
+            return false
+        }
+
+        private func estimatedPostSeekTime() -> TimeInterval? {
+            guard let pendingDanmakuSeek else { return nil }
+            let elapsed = max(0, ProcessInfo.processInfo.systemUptime - pendingDanmakuSeek.startedAt)
+            return pendingDanmakuSeek.target
+                + elapsed * DanmakuTimelinePolicy.playbackRate(currentPlaybackRate)
         }
 
         private func updateDanmakuPlaybackActivity() {

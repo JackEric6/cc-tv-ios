@@ -269,6 +269,7 @@ struct DetailView: View {
                     outroLabel: outroMarkerLabel,
                     danmakuTitle: viewModel.vodInfo?.name ?? video.name,
                     danmakuEpisode: currentDanmakuEpisode,
+                    displayEpisodeTitle: currentPlayerEpisodeTitle,
                     danmakuEnabled: isDanmakuEnabled,
                     onDanmakuEnabledChanged: { isDanmakuEnabled = $0 },
                     onFullScreenChanged: { showFullScreen = $0 },
@@ -998,6 +999,15 @@ struct DetailView: View {
         let name = viewModel.currentEpisodes[viewModel.selectedEpisodeIndex].name
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return name.isEmpty ? "第\(viewModel.selectedEpisodeIndex + 1)集" : name
+    }
+
+    private var currentPlayerEpisodeTitle: String {
+        guard viewModel.currentEpisodes.count > 1,
+              viewModel.selectedEpisodeIndex >= 0,
+              viewModel.selectedEpisodeIndex < viewModel.currentEpisodes.count else {
+            return ""
+        }
+        return "第\(viewModel.selectedEpisodeIndex + 1)集"
     }
 
     private func saveHistoryForCurrentEpisode(progressOverride: Double? = nil) {

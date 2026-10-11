@@ -28,40 +28,30 @@ struct SettingsView: View {
     
     enum PickerType {
         case none
-        case vodPlayer
         case decode
         case vlcBuffer
         case playTimeStep
+        case m3u8Purify
+        case systemProxy
+    }
+
+    enum BinaryChoice: String, CaseIterable, Identifiable {
+        case enabled
+        case disabled
+
+        var id: String { rawValue }
+
+        var title: String {
+            self == .enabled ? "开启" : "关闭"
+        }
     }
     
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 24) {
-                    // API 配置
-                    SectionCard(title: "数据源") {
-                        SettingsRow(
-                            icon: "film",
-                            title: "点播接口地址",
-                            value: viewModel.vodApiUrl.isEmpty ? "未配置" : viewModel.vodApiUrl
-                        ) {
-                            editingApiType = .vod
-                            showApiInput = true
-                        }
-                    }
-                    
                     // 播放设置
                     SectionCard(title: "播放设置") {
-                        #if os(iOS)
-                        SettingsRow(icon: "play.rectangle", title: "点播播放器", value: "KSPlayer", action: nil)
-                        #else
-                        SettingsRow(icon: "play.rectangle", title: "点播播放器", value: viewModel.vodPlayerEngine.title) {
-                            if viewModel.playerEngineOptions.count > 1 {
-                                showingPicker = .vodPlayer
-                            }
-                        }
-                        #endif
-                        Divider().background(Color.white.opacity(0.1))
                         SettingsRow(icon: "cpu", title: "视频解码", value: viewModel.decodeMode.title) {
                             showingPicker = .decode
                         }
@@ -76,21 +66,25 @@ struct SettingsView: View {
                             showingPicker = .playTimeStep
                         }
                         Divider().background(Color.white.opacity(0.1))
-                        Toggle(isOn: Binding(
-                            get: { viewModel.m3u8Purify },
-                            set: { viewModel.setM3U8Purify($0) }
-                        )) {
-                            Label("M3U8 净化", systemImage: "wand.and.stars")
+                        SettingsRow(
+                            icon: "wand.and.stars",
+                            title: "M3U8 净化",
+                            value: viewModel.m3u8Purify ? "开启" : "关闭",
+                            iconColor: .yellow,
+                            highlighted: true
+                        ) {
+                            showingPicker = .m3u8Purify
                         }
-                        .tint(.orange)
                         Divider().background(Color.white.opacity(0.1))
-                        Toggle(isOn: Binding(
-                            get: { viewModel.useSystemProxy },
-                            set: { viewModel.setUseSystemProxy($0) }
-                        )) {
-                            Label("使用系统代理", systemImage: "network")
+                        SettingsRow(
+                            icon: "network",
+                            title: "使用系统代理",
+                            value: viewModel.useSystemProxy ? "开启" : "关闭",
+                            iconColor: .yellow,
+                            highlighted: true
+                        ) {
+                            showingPicker = .systemProxy
                         }
-                        .tint(.orange)
                     }
                     
                     // 功能
@@ -156,23 +150,6 @@ struct SettingsView: View {
     @ViewBuilder
     private var pickerOverlay: some View {
         switch showingPicker {
-        case .vodPlayer:
-            #if os(macOS)
-            SelectionModal(
-                title: "选择点播播放器",
-                icon: "play.rectangle.fill",
-                items: viewModel.playerEngineOptions,
-                selectedItem: viewModel.vodPlayerEngine,
-                itemTitle: { $0.title },
-                onSelect: { engine in
-                    viewModel.setVodPlayerEngine(engine)
-                    showingPicker = .none
-                },
-                onCancel: { showingPicker = .none }
-            )
-            #else
-            EmptyView()
-            #endif
         case .decode:
             SelectionModal(
                 title: "视频解码模式",
@@ -208,6 +185,34 @@ struct SettingsView: View {
                 itemTitle: { "\($0) 秒" },
                 onSelect: { step in
                     viewModel.setPlayTimeStep(step)
+                    showingPicker = .none
+                },
+                onCancel: { showingPicker = .none }
+            )
+        case .m3u8Purify:
+            SelectionModal(
+                title: "M3U8 净化",
+                icon: "wand.and.stars",
+                accentColor: .yellow,
+                items: BinaryChoice.allCases,
+                selectedItem: viewModel.m3u8Purify ? .enabled : .disabled,
+                itemTitle: { $0.title },
+                onSelect: { choice in
+                    viewModel.setM3U8Purify(choice == .enabled)
+                    showingPicker = .none
+                },
+                onCancel: { showingPicker = .none }
+            )
+        case .systemProxy:
+            SelectionModal(
+                title: "使用系统代理",
+                icon: "network",
+                accentColor: .yellow,
+                items: BinaryChoice.allCases,
+                selectedItem: viewModel.useSystemProxy ? .enabled : .disabled,
+                itemTitle: { $0.title },
+                onSelect: { choice in
+                    viewModel.setUseSystemProxy(choice == .enabled)
                     showingPicker = .none
                 },
                 onCancel: { showingPicker = .none }
@@ -438,13 +443,12 @@ private struct FeedbackSuggestionView: View {
         guard !trimmedFeedback.isEmpty else { return }
 
         if trimmedFeedback == "8801" {
-            guard appState.apiConfig.unlockYutuSource() else {
-                submissionMessage = "玉兔影视源暂不可用"
-                return
-            }
-            appState.applyLoadedConfigState(refreshHome: true)
-            feedback = ""
-            submissionMessage = "玉兔影视源已切换为首页"
+            setHomeSource(key: "xgzy", title: "西瓜")
+            return
+        }
+
+        if trimmedFeedback == "9901" {
+            setHomeSource(key: "jianpian", title: "荐片")
             return
         }
 
@@ -454,6 +458,19 @@ private struct FeedbackSuggestionView: View {
         UserDefaults.standard.set(records, forKey: feedbackStorageKey)
         feedback = ""
         submissionMessage = "已提交"
+    }
+
+    private func setHomeSource(key: String, title: String) {
+        guard let source = appState.apiConfig.sourceBeanList.first(where: {
+            $0.key.caseInsensitiveCompare(key) == .orderedSame && $0.isSelectable
+        }) else {
+            submissionMessage = "当前配置中没有可用的\(title)源"
+            return
+        }
+        appState.apiConfig.setHomeSource(source)
+        appState.applyLoadedConfigState(refreshHome: true)
+        feedback = ""
+        submissionMessage = "已切换为\(title)首页"
     }
 }
 
@@ -483,6 +500,8 @@ struct SettingsRow: View {
     let icon: String
     let title: String
     let value: String
+    var iconColor: Color = .orange
+    var highlighted = false
     let action: (() -> Void)?
     
     var body: some View {
@@ -502,18 +521,18 @@ struct SettingsRow: View {
         HStack(spacing: 16) {
             Image(systemName: icon)
                 .font(.system(size: 16))
-                .foregroundColor(.orange)
+                .foregroundColor(iconColor)
                 .frame(width: 24)
             
             Text(title)
                 .font(.body)
-                .foregroundColor(.white.opacity(0.9))
+                .foregroundColor(highlighted ? .yellow : .white.opacity(0.9))
             
             Spacer()
             
             Text(value)
                 .font(.subheadline)
-                .foregroundColor(.white.opacity(0.5))
+                .foregroundColor(highlighted ? .yellow.opacity(0.8) : .white.opacity(0.5))
                 .lineLimit(1)
             
             Image(systemName: "chevron.right")

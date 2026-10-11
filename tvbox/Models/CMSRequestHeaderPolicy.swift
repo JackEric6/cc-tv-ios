@@ -42,7 +42,6 @@ enum CMSRequestHeaderPolicy {
         "www.mdzyapi.com": "https://moduzy.com/",
         "subocj.com": "https://www.suboziyuan.net/",
         "api.apibdzy.com": "https://bdzy.tv/",
-        "apiyutu.com": "https://yutuzy.com/",
         "cdn.dzzyapi.com": "https://dzzy.com/",
         "cj.rycjapi.com": "https://ryzy.tv/",
         "api.yparse.com": "https://yparse.com/",

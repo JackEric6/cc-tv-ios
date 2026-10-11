@@ -29,8 +29,6 @@ class ApiConfig: ObservableObject {
     @Published var danmaku: String = ""
     private(set) var m3u8HostRules: [M3U8HostRule] = []
 
-    /// 玉兔解锁仅在当前应用会话有效；新会话默认从瓜子首页开始。
-    private(set) var isYutuUnlocked = false
     private(set) var isGuaziUnlocked = false
 
     private let network = NetworkManager.shared
@@ -142,6 +140,7 @@ class ApiConfig: ObservableObject {
     private static func isDefaultXgzyConfig(_ url: String) -> Bool {
         let normalized = url.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return normalized == "bundle://xgzy_config_all.json"
+            || normalized.contains("movie2_kktvs")
             || normalized.contains("movie2_xgzy")
             || normalized.contains("xgzy-config")
     }
@@ -646,8 +645,7 @@ class ApiConfig: ObservableObject {
                 site.api ?? "",
                 sourceKey: sourceKey
             ),
-            searchable: site.key == "yutu" && self.isYutuUnlocked
-                ? 1 : (site.searchable?.value ?? 1),
+            searchable: site.searchable?.value ?? 1,
             filterable: site.filterable?.value ?? 1,
             quickSearch: site.quickSearch?.value ?? 0,
             playerType: site.playerType?.value ?? 0,
@@ -656,12 +654,9 @@ class ApiConfig: ObservableObject {
             timeout: site.timeout?.value,
             headers: site.headers?.compactMapValues(\.stringValue),
             icon: site.icon,
-            changeable: (site.key == "yutu" && self.isYutuUnlocked)
-                ? 1 : (site.changeable?.value ?? 1),
-            hidden: (site.key == "yutu" && self.isYutuUnlocked)
-                ? false : (site.hidden ?? false),
-            disabled: (site.key == "yutu" && self.isYutuUnlocked)
-                ? false : (site.disabled ?? false),
+            changeable: site.changeable?.value ?? 1,
+            hidden: site.hidden ?? false,
+            disabled: site.disabled ?? false,
             backupApi: site.backupApi ?? [],
             backupDomain: site.backupDomain ?? []
         )
@@ -678,12 +673,9 @@ class ApiConfig: ObservableObject {
 
         if includeSources {
             // 解析站点列表
-            var sources = (config.sites ?? []).map { self.makeSourceBean(from: $0) }
-            if self.isYutuUnlocked, !sources.contains(where: { $0.key == "yutu" }),
-               let bundledConfig = Self.loadBundledConfig(named: "xgzy_config_all"),
-               let yutuSite = bundledConfig.sites?.first(where: { $0.key == "yutu" }) {
-                sources.append(self.makeSourceBean(from: yutuSite))
-            }
+            var sources = (config.sites ?? [])
+                .filter { $0.key?.caseInsensitiveCompare("yutu") != .orderedSame }
+                .map { self.makeSourceBean(from: $0) }
             // 瓜子使用 iOS 专用加密服务。远程配置中的同名条目可能是旧的
             // JAR/隐藏定义，必须由内置 iOS 定义覆盖，才能进入聚合搜索。
             if let bundledConfig = Self.loadBundledConfig(named: "xgzy_config_all"),
@@ -692,7 +684,7 @@ class ApiConfig: ObservableObject {
                 sources.append(self.makeSourceBean(from: guaziSite))
             }
             if let bundledSites = Self.loadBundledConfig(named: "xgzy_config_all")?.sites {
-                let migratedKeys: Set<String> = ["jianpian", "fhw88", "cz4k", "fan_moli", "ikanbot", "zanpian"]
+                let migratedKeys: Set<String> = ["jianpian", "ffzy", "fhw88", "cz4k", "fan_moli", "ikanbot", "zanpian"]
                 for site in bundledSites {
                     guard let key = site.key?.lowercased(), migratedKeys.contains(key) else { continue }
                     let source = self.makeSourceBean(from: site)
@@ -710,27 +702,35 @@ class ApiConfig: ObservableObject {
             } else if self.sourceBeanList.isEmpty,
                       let bundled = Self.loadBundledConfig(named: "xgzy_config_all"),
                       let bundledSites = bundled.sites {
-                let bundledSources = bundledSites.map { self.makeSourceBean(from: $0) }
+                let bundledSources = bundledSites
+                    .filter { $0.key?.caseInsensitiveCompare("yutu") != .orderedSame }
+                    .map { self.makeSourceBean(from: $0) }
                 if !bundledSources.isEmpty {
                     self.sourceBeanList = bundledSources
                 }
             }
 
             if !self.sourceBeanList.isEmpty {
-                // 保留当前会话中主动选择的源；新会话没有内存选项，始终从瓜子开始。
-                if let selectedKey = self.homeSourceBean?.key,
-                   (selectedKey != "yutu" || self.isYutuUnlocked),
-                   let selectedSource = self.sourceBeanList.first(where: { $0.key == selectedKey && $0.isSelectable }) {
+                // 保留已选择的首页源；没有有效选择时按瓜子、西瓜、荐片顺序初始化。
+                let savedHomeKey = UserDefaults.standard.string(forKey: HawkConfig.HOME_API)
+                let selectedKey = self.homeSourceBean?.key ?? savedHomeKey
+                if let selectedKey,
+                   let selectedSource = self.sourceBeanList.first(where: {
+                       $0.key.caseInsensitiveCompare(selectedKey) == .orderedSame && $0.isSelectable
+                   }) {
                     self.homeSourceBean = selectedSource
                 } else {
-                    // 瓜子为默认首页；西瓜保留为可选源及瓜子空结果时的首页兜底。
+                    // 瓜子为默认首页；西瓜和荐片按顺序作为失败回退源。
                     let guazi = self.sourceBeanList.first(where: {
                         $0.key.caseInsensitiveCompare("guazi") == .orderedSame && $0.isSelectable
                     })
                     let xigua = self.sourceBeanList.first(where: { $0.key == "xgzy" && $0.isSelectable })
+                    let jianpian = self.sourceBeanList.first(where: {
+                        $0.key.caseInsensitiveCompare("jianpian") == .orderedSame && $0.isSelectable
+                    })
                         ?? self.sourceBeanList.first(where: { $0.isSelectable })
                         ?? self.sourceBeanList.first
-                    self.homeSourceBean = guazi ?? xigua
+                    self.homeSourceBean = guazi ?? xigua ?? jianpian
                     if let defaultSource = self.homeSourceBean {
                         UserDefaults.standard.set(defaultSource.key, forKey: HawkConfig.HOME_API)
                     }
@@ -1114,26 +1114,6 @@ class ApiConfig: ObservableObject {
     func setHomeSource(_ source: SourceBean) {
         self.homeSourceBean = source
         UserDefaults.standard.set(source.key, forKey: HawkConfig.HOME_API)
-    }
-
-    @discardableResult
-    func unlockYutuSource() -> Bool {
-        isYutuUnlocked = true
-        if let index = sourceBeanList.firstIndex(where: { $0.key == "yutu" }) {
-            sourceBeanList[index].searchable = 1
-            sourceBeanList[index].changeable = 1
-            sourceBeanList[index].hidden = false
-            sourceBeanList[index].disabled = false
-        } else if let config = Self.loadBundledConfig(named: "xgzy_config_all"),
-                  let site = config.sites?.first(where: { $0.key == "yutu" }) {
-            sourceBeanList.append(makeSourceBean(from: site))
-        }
-        guard let source = sourceBeanList.first(where: { $0.key == "yutu" && $0.isSelectable }) else {
-            isYutuUnlocked = false
-            return false
-        }
-        homeSourceBean = source
-        return true
     }
 
     @discardableResult

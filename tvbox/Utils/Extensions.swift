@@ -484,6 +484,7 @@ extension UIImage {
 struct SelectionModal<Item: Identifiable & Equatable>: View {
     let title: String
     let icon: String // SF Symbol 名称
+    var accentColor: Color = .orange
     let items: [Item]
     let selectedItem: Item?
     let itemTitle: (Item) -> String
@@ -515,7 +516,7 @@ struct SelectionModal<Item: Identifiable & Equatable>: View {
                     ZStack {
                         // 动态光晕背景
                         Circle()
-                            .fill(LinearGradient(colors: [.orange, .red], startPoint: .topLeading, endPoint: .bottomTrailing))
+                            .fill(LinearGradient(colors: [accentColor, accentColor.opacity(0.7)], startPoint: .topLeading, endPoint: .bottomTrailing))
                             .frame(width: 56, height: 56)
                             .blur(radius: 20)
                             .opacity(0.4)
@@ -561,9 +562,9 @@ struct SelectionModal<Item: Identifiable & Equatable>: View {
                                     
                                     if item == selectedItem {
                                         Image(systemName: "checkmark.circle.fill")
-                                            .foregroundColor(.orange)
+                                            .foregroundColor(accentColor)
                                             .font(.system(size: 18))
-                                            .shadow(color: Color.orange.opacity(0.4), radius: 4)
+                                            .shadow(color: accentColor.opacity(0.4), radius: 4)
                                     } else {
                                         Circle()
                                             .strokeBorder(Color.white.opacity(0.15), lineWidth: 1.5)
@@ -632,7 +633,7 @@ struct SelectionModal<Item: Identifiable & Equatable>: View {
     
     private func selectionBackground(item: Item) -> Color {
         if item == selectedItem {
-            return Color.orange.opacity(0.2)
+            return accentColor.opacity(0.2)
         } else if item.id == hoverItemId {
             return Color.white.opacity(0.1)
         } else {
@@ -642,7 +643,7 @@ struct SelectionModal<Item: Identifiable & Equatable>: View {
     
     private func selectionStroke(item: Item) -> Color {
         if item == selectedItem {
-            return Color.orange.opacity(0.6)
+            return accentColor.opacity(0.6)
         } else if item.id == hoverItemId {
             return Color.white.opacity(0.2)
         } else {

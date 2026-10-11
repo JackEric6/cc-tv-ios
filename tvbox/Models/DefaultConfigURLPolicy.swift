@@ -19,6 +19,8 @@ enum DefaultConfigURLPolicy {
             || host == "raw.githubusercontent.com"
             || host.hasSuffix(".githubusercontent.com")
         return isKnownConfigHost
-            && (path.contains("movie2_xgzy_all") || path.contains("xgzy-config"))
+            && (path.contains("movie2_kktvs")
+                || path.contains("movie2_xgzy_all")
+                || path.contains("xgzy-config"))
     }
 }

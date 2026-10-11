@@ -11,8 +11,15 @@ final class DanmakuOverlayView: UIView {
         let layer: CATextLayer
     }
 
+    private struct PendingCue {
+        let cue: DanmuCue
+        let startTime: TimeInterval
+        let duration: TimeInterval
+    }
+
     private var cues: [DanmuCue] = []
     private var activeCues: [String: ActiveCue] = [:]
+    private var pendingCues: [PendingCue] = []
     private var maximumCueTextLength = 0
     private var nextCueIndex = 0
     private var displayLink: CADisplayLink?
@@ -63,6 +70,7 @@ final class DanmakuOverlayView: UIView {
             }
             .filter { seen.insert($0.id).inserted }
         maximumCueTextLength = self.cues.map { $0.text.utf16.count }.max() ?? 0
+        pendingCues.removeAll(keepingCapacity: true)
         reset()
     }
 
@@ -71,6 +79,7 @@ final class DanmakuOverlayView: UIView {
         self.settings = settings.normalized
         layoutIsReady = bounds.width > 0 && bounds.height > 0
         clearActiveCues()
+        pendingCues.removeAll(keepingCapacity: true)
         nextCueIndex = lowerBound(for: max(0, now - activeDisplayWindow))
         if layoutIsReady, hasTimeAnchor, !cues.isEmpty {
             render(at: now)
@@ -89,22 +98,34 @@ final class DanmakuOverlayView: UIView {
     }
 
     /// The player supplies media time; the display link only interpolates between callbacks.
-    func update(currentTime: TimeInterval, duration: TimeInterval = 0, playbackRate: Double = 1) {
+    func update(
+        currentTime: TimeInterval,
+        duration: TimeInterval = 0,
+        playbackRate: Double = 1,
+        forceTimelineSync: Bool = false
+    ) {
         let boundedTime = max(0, currentTime.isFinite ? currentTime : 0)
+        let wasAnchored = hasTimeAnchor
+        let previousRate = self.playbackRate
         let didSeek = DanmakuTimelinePolicy.didSeek(
             from: hasTimeAnchor ? currentTimelineTime() : nil,
             to: boundedTime
         )
+        let timelineDiscontinuity = forceTimelineSync || didSeek
 
         mediaDuration = max(0, duration.isFinite ? duration : 0)
         mediaTime = boundedTime
         self.playbackRate = DanmakuTimelinePolicy.playbackRate(playbackRate)
         wallClockAnchor = CACurrentMediaTime()
         hasTimeAnchor = true
-        synchronizeTimelineLayer()
+        if !wasAnchored || timelineDiscontinuity || !self.playbackActive
+            || abs(previousRate - self.playbackRate) > 0.001 {
+            synchronizeTimelineLayer()
+        }
 
-        if didSeek {
+        if timelineDiscontinuity {
             removeInactiveCues(afterSeekTo: boundedTime)
+            pendingCues.removeAll(keepingCapacity: true)
             nextCueIndex = lowerBound(for: max(0, boundedTime - activeDisplayWindow))
         }
 
@@ -116,6 +137,7 @@ final class DanmakuOverlayView: UIView {
 
     func reset() {
         clearActiveCues()
+        pendingCues.removeAll(keepingCapacity: true)
         nextCueIndex = 0
         mediaTime = 0
         mediaDuration = 0
@@ -151,6 +173,7 @@ final class DanmakuOverlayView: UIView {
             timelineLayer.frame = bounds
             CATransaction.commit()
             clearActiveCues()
+            pendingCues.removeAll(keepingCapacity: true)
             guard layoutIsReady, hasTimeAnchor, !cues.isEmpty else { return }
             let now = currentTimelineTime()
             nextCueIndex = lowerBound(for: max(0, now - activeDisplayWindow))
@@ -206,13 +229,30 @@ final class DanmakuOverlayView: UIView {
             guard DanmakuTimelinePolicy.shouldDisplayCue(age: time - cueTime, duration: duration) else {
                 continue
             }
-            place(cue, startTime: cueTime, at: time, duration: duration)
+            if !place(cue, startTime: cueTime, at: time, duration: duration), pendingCues.count < 200 {
+                pendingCues.append(PendingCue(cue: cue, startTime: cueTime, duration: duration))
+            }
             emitted += 1
+        }
+
+        guard !pendingCues.isEmpty else { return }
+        let pending = pendingCues
+        pendingCues.removeAll(keepingCapacity: true)
+        for item in pending {
+            guard DanmakuTimelinePolicy.shouldDisplayCue(
+                age: time - item.startTime,
+                duration: item.duration
+            ) else { continue }
+            if !place(item.cue, startTime: item.startTime, at: time, duration: item.duration),
+               pendingCues.count < 200 {
+                pendingCues.append(item)
+            }
         }
     }
 
-    private func place(_ cue: DanmuCue, startTime: TimeInterval, at time: TimeInterval, duration: TimeInterval) {
-        guard activeCues[cue.id] == nil else { return }
+    @discardableResult
+    private func place(_ cue: DanmuCue, startTime: TimeInterval, at time: TimeInterval, duration: TimeInterval) -> Bool {
+        guard activeCues[cue.id] == nil else { return true }
         let size = max(12, min(36, CGFloat(cue.size) * settings.sizeScale))
         let font = UIFont.systemFont(ofSize: size, weight: settings.fontWeight)
         let textWidth = (cue.text as NSString).size(withAttributes: [.font: font]).width
@@ -223,7 +263,7 @@ final class DanmakuOverlayView: UIView {
             width: Double(cueWidth)
         )
         let rows = availableLaneCount
-        guard rows > 0 else { return }
+        guard rows > 0 else { return false }
 
         let existingByLane = Dictionary(grouping: activeCues.values, by: \.lane)
         guard let lane = (0..<rows).first(where: { lane in
@@ -235,9 +275,7 @@ final class DanmakuOverlayView: UIView {
                 viewportWidth: Double(bounds.width),
                 minimumGap: minimumLaneGap
             )
-        }) else {
-            return
-        }
+        }) else { return false }
 
         let opacity = CGFloat(settings.opacity) / 100
         let textLayer = CATextLayer()
@@ -269,6 +307,7 @@ final class DanmakuOverlayView: UIView {
         textLayer.add(animation, forKey: "danmaku.scroll")
         let active = ActiveCue(cue: cue, trajectory: trajectory, lane: lane, layer: textLayer)
         activeCues[cue.id] = active
+        return true
     }
 
     private func removeExpiredCues(at time: TimeInterval) {

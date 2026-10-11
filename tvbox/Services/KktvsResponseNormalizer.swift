@@ -69,6 +69,29 @@ enum KktvsResponseNormalizer {
         return url
     }
 
+    static func embeddedMediaURL(in value: String) -> String? {
+        guard let components = URLComponents(string: value),
+              let nested = components.queryItems?.first(where: {
+                  let name = $0.name.lowercased()
+                  return name == "url" || name == "play" || name == "playurl"
+              })?.value else {
+            return nil
+        }
+        var candidate = unescape(nested.trimmingCharacters(in: .whitespacesAndNewlines))
+        if !isHTTPURL(candidate), let decoded = candidate.removingPercentEncoding {
+            candidate = decoded
+        }
+        if candidate.hasPrefix("//") {
+            candidate = "https:" + candidate
+        }
+        return isHTTPURL(candidate) ? candidate : nil
+    }
+
+    static func normalizeMediaURLPreservingWrapper(_ value: String) -> String {
+        let trimmed = unescape(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        return embeddedMediaURL(in: trimmed) == nil ? normalizeMediaURL(trimmed) : trimmed
+    }
+
     static func isHLSPlaylist(_ response: String) -> Bool {
         let normalized = response
             .replacingOccurrences(of: "\u{FEFF}", with: "")
