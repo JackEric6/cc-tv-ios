@@ -259,9 +259,9 @@ final class DanmakuOverlayView: UIView {
             viewportWidth: Double(bounds.width)
         ) else { return }
         active.label.frame = CGRect(
-            x: position.minX,
+            x: CGFloat(position.left),
             y: CGFloat(active.lane) * laneHeight,
-            width: position.width,
+            width: CGFloat(active.trajectory.width),
             height: laneHeight
         )
     }
