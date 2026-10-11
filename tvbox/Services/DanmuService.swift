@@ -177,7 +177,7 @@ public final class DanmuService {
         cacheKey: String
     ) async throws -> [DanmuSearchResult] {
         let apiURLs = resolveAPIURLs(configuration)
-        let uniqueResults = await firstNonEmpty(from: apiURLs) { [weak self] apiURL in
+        let uniqueResults: [DanmuSearchResult] = await firstNonEmpty(from: apiURLs) { [weak self] apiURL in
             guard let self else { return [] }
             do {
                 if Self.isBuiltinAPI(apiURL) {
@@ -442,7 +442,7 @@ public final class DanmuService {
         }
     }
 
-    private static func parseBuiltinSearchResults(_ body: String, baseURL: String) -> [DanmuSearchResult] {
+    private nonisolated static func parseBuiltinSearchResults(_ body: String, baseURL: String) -> [DanmuSearchResult] {
         guard let object = jsonObject(body) else { return [] }
         var results: [DanmuSearchResult] = []
         func appendEpisodes(_ value: [String: Any], prefix: String = "") {
@@ -757,7 +757,7 @@ public final class DanmuService {
         return result
     }
 
-    private static func makeURL(
+    private nonisolated static func makeURL(
         baseURL: String,
         path: String,
         queryItems: [URLQueryItem]
@@ -773,7 +773,7 @@ public final class DanmuService {
         return url
     }
 
-    private static func urlPathEscape(_ value: String) -> String {
+    private nonisolated static func urlPathEscape(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
     }
 
@@ -821,7 +821,7 @@ public final class DanmuService {
         let title: String
     }
 
-    private static func findAnimeIDs(in body: String) -> [String] {
+    private nonisolated static func findAnimeIDs(in body: String) -> [String] {
         guard let object = jsonObject(body) else { return [] }
         let arrays = ["animes", "anime", "data"]
         var ids: [String] = []
@@ -838,7 +838,7 @@ public final class DanmuService {
         return ids.filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 
-    private static func findEpisodes(in body: String, requestedEpisode: String) -> [EpisodeMatch] {
+    private nonisolated static func findEpisodes(in body: String, requestedEpisode: String) -> [EpisodeMatch] {
         guard let object = jsonObject(body) else { return [] }
         let episodeArrays = episodeArrays(in: object)
         var matches: [EpisodeMatch] = []
@@ -898,7 +898,7 @@ public final class DanmuService {
         return matches
     }
 
-    private static func isMovieResult(_ object: [String: Any]) -> Bool {
+    private nonisolated static func isMovieResult(_ object: [String: Any]) -> Bool {
         func isMovie(_ value: String) -> Bool {
             value.localizedCaseInsensitiveContains("电影")
                 || value.localizedCaseInsensitiveContains("movie")
@@ -919,7 +919,7 @@ public final class DanmuService {
         return false
     }
 
-    private static func episodeArrays(in object: [String: Any]) -> [[String: Any]] {
+    private nonisolated static func episodeArrays(in object: [String: Any]) -> [[String: Any]] {
         if let episodes = object["episodes"] as? [[String: Any]] { return episodes }
         if let bangumi = object["bangumi"] as? [String: Any],
            let episodes = bangumi["episodes"] as? [[String: Any]] {
@@ -938,21 +938,21 @@ public final class DanmuService {
         return nestedEpisodes
     }
 
-    private static func parseEpisodeNumber(_ value: String) -> Int {
+    private nonisolated static func parseEpisodeNumber(_ value: String) -> Int {
         if let number = Double(value.trimmingCharacters(in: .whitespacesAndNewlines)) {
             return Int(number)
         }
         return extractNumber(from: value)
     }
 
-    private static func extractNumber(from value: String) -> Int {
+    private nonisolated static func extractNumber(from value: String) -> Int {
         extractEpisodeNumber(value)
     }
 
     /// Mirrors Android DanmuEpisodeMatcher.episodeNumber(): prefer the
     /// episode portion of SxxExx/EPx labels instead of concatenating season
     /// and episode digits (S01E02 must resolve to episode 2, not 102).
-    private static func extractEpisodeNumber(_ value: String) -> Int {
+    private nonisolated static func extractEpisodeNumber(_ value: String) -> Int {
         let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
         let patterns = [
             #"(?i)S\s*\d+\s*E\s*0*(\d+)"#,
@@ -973,7 +973,7 @@ public final class DanmuService {
         return Int(normalized[range]) ?? -1
     }
 
-    private static func jsonObject(_ body: String) -> [String: Any]? {
+    private nonisolated static func jsonObject(_ body: String) -> [String: Any]? {
         guard let data = body.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
@@ -987,7 +987,7 @@ public final class DanmuService {
         return ""
     }
 
-    private static func firstString(_ object: [String: Any], keys: [String]) -> String {
+    private nonisolated static func firstString(_ object: [String: Any], keys: [String]) -> String {
         for key in keys {
             if let value = object[key] as? String, !value.isEmpty { return value }
             if let value = object[key] as? NSNumber { return value.stringValue }
