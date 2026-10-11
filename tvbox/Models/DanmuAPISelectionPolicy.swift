@@ -8,8 +8,7 @@ enum DanmuAPISelectionPolicy {
         configured: String?,
         builtin: String
     ) -> [String] {
-        let builtinURL = normalized(builtin)
-        guard !builtinURL.isEmpty else { return [] }
+        guard let builtinURL = normalized(builtin) else { return [] }
 
         if let explicitURL = normalized(explicit) {
             return unique([explicitURL, builtinURL])
