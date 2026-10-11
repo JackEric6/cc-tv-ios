@@ -31,6 +31,29 @@ struct VerifySourceEndpointFallback {
         precondition(quantum.count == 3)
         precondition(quantum[1].contains("/api.php/provide/vod/?"))
         precondition(quantum[2].contains("/api.php/provide/vod/from/lzyun/?"))
+
+        let ffzy = SourceEndpointRequestPolicy.candidates(
+            for: "https://api.ffzyapi.com/api.php/provide/vod/from/ffm3u8/?ac=detail&wd=test",
+            backupAPIs: [],
+            backupDomains: []
+        )
+        precondition(ffzy.contains { $0.contains("cj.ffzyapi.com/api.php/provide/vod/from/ffm3u8/") })
+        precondition(ffzy.contains { $0.contains("api.ffzyapi.com/api.php/provide/vod/?ac=detail&wd=test") })
+
+        let dytt = SourceEndpointRequestPolicy.candidates(
+            for: "https://caiji.dyttzyapi.com/api.php/provide/vod/?ac=detail&wd=test",
+            backupAPIs: [],
+            backupDomains: []
+        )
+        precondition(dytt.contains { $0.contains("/api.php/provide/vod/from/dyttm3u8/?ac=detail&wd=test") })
+
+        let xintong = SourceEndpointRequestPolicy.candidates(
+            for: "https://cj.ffzyapi.com/api.php/provide/vod/?ac=detail&wd=test",
+            backupAPIs: [],
+            backupDomains: []
+        )
+        precondition(xintong.count == 2)
+        precondition(xintong[1].contains("/api.php/provide/vod/from/ffm3u8/?ac=detail&wd=test"))
         print("SOURCE ENDPOINT FALLBACK CHECKS PASSED")
     }
 }

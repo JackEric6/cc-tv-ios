@@ -36,6 +36,15 @@ struct CmsNormalizerSmokeTest {
             "player page media URL extraction failed"
         )
 
+        let sharedPlaybackPage = #"<script>const url = "/20250930/45905_303d834a/index.m3u8?sign=abc123";</script>"#
+        precondition(
+            KktvsResponseNormalizer.extractMediaURL(
+                from: sharedPlaybackPage,
+                baseURL: "https://vip.ffzy-plays.com/share/303d834ae7ba59a8233f9b0bd60998fe"
+            ) == "https://vip.ffzy-plays.com/20250930/45905_303d834a/index.m3u8?sign=abc123",
+            "relative share-page HLS URL was not resolved with its token"
+        )
+
         let redirectedPlayerPage = #"<script>var player={"url":"../media/index.m3u8?ticket=redirected"};</script>"#
         precondition(
             KktvsResponseNormalizer.extractMediaURL(

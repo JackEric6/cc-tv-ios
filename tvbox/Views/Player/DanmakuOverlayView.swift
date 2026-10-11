@@ -5,6 +5,7 @@ import UIKit
 /// Media-time scheduler backed by DanmakuKit's asynchronous cells and lane collision checks.
 final class DanmakuOverlayView: UIView {
     private let renderer = DanmakuKit.DanmakuView()
+    private var rendererHeightConstraint: NSLayoutConstraint!
     private var cues: [DanmuCue] = []
     private var nextCueIndex = 0
     private var displayLink: CADisplayLink?
@@ -42,11 +43,12 @@ final class DanmakuOverlayView: UIView {
         renderer.enableCellReusable = true
         renderer.isOverlap = false
         addSubview(renderer)
+        rendererHeightConstraint = renderer.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
             renderer.leadingAnchor.constraint(equalTo: leadingAnchor),
             renderer.trailingAnchor.constraint(equalTo: trailingAnchor),
             renderer.topAnchor.constraint(equalTo: topAnchor),
-            renderer.bottomAnchor.constraint(equalTo: bottomAnchor)
+            rendererHeightConstraint
         ])
         applyTrackSettings()
     }
@@ -65,6 +67,10 @@ final class DanmakuOverlayView: UIView {
         let now = currentTimelineTime()
         self.settings = settings.normalized
         applyTrackSettings()
+        setNeedsLayout()
+        layoutIfNeeded()
+        renderer.layoutIfNeeded()
+        renderer.recalculateTracks()
         renderer.clean()
         nextCueIndex = lowerBound(for: max(0, now - max(fixedDuration, self.settings.scrollDuration)))
         render(at: now)
@@ -149,6 +155,7 @@ final class DanmakuOverlayView: UIView {
         guard bounds.size != lastLayoutSize else { return }
         lastLayoutSize = bounds.size
         applyTrackSettings()
+        renderer.layoutIfNeeded()
         renderer.recalculateTracks()
         guard hasTimeAnchor, !cues.isEmpty else { return }
         render(at: currentTimelineTime())
@@ -156,7 +163,15 @@ final class DanmakuOverlayView: UIView {
 
     private func applyTrackSettings() {
         let rowCount = max(1, settings.rowCount)
-        renderer.trackHeight = max(20, bounds.height / CGFloat(rowCount))
+        let trackHeight = DanmakuTimelinePolicy.trackHeight(viewportHeight: Double(bounds.height))
+        renderer.trackHeight = CGFloat(trackHeight)
+        rendererHeightConstraint.constant = CGFloat(
+            DanmakuTimelinePolicy.trackRegionHeight(
+                viewportHeight: Double(bounds.height),
+                rowCount: rowCount,
+                trackHeight: trackHeight
+            )
+        )
         renderer.displayArea = 1
     }
 

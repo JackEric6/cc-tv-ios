@@ -21,7 +21,7 @@ enum SourceEndpointRequestPolicy {
             alternate.path = path
             append(alternate)
         }
-        for rawAPI in backupAPIs {
+        for rawAPI in backupAPIs + knownBackupAPIs(for: request.host?.lowercased() ?? "") {
             guard let base = URLComponents(string: rawAPI.trimmingCharacters(in: .whitespacesAndNewlines)),
                   isHTTP(base) else { continue }
             append(mergingRequestParameters(from: request, into: base))
@@ -60,6 +60,16 @@ enum SourceEndpointRequestPolicy {
 
     private static func alternatePaths(for host: String) -> [String] {
         switch host {
+        case "api.ffzyapi.com":
+            return [
+                "/api.php/provide/vod/",
+                "/api.php/provide/vod/from/ffm3u8/at/json/"
+            ]
+        case "caiji.dyttzyapi.com":
+            return [
+                "/api.php/provide/vod/from/dyttm3u8/",
+                "/api.php/provide/vod/from/dyttm3u8/at/json/"
+            ]
         case "caiji.dbzy5.com":
             return [
                 "/api.php/provide/vod/",
@@ -103,6 +113,18 @@ enum SourceEndpointRequestPolicy {
             return [
                 "/api.php/provide/vod/from/ikm3u8/at/json",
                 "/api.php/provide/vod/"
+            ]
+        default:
+            return []
+        }
+    }
+
+    private static func knownBackupAPIs(for host: String) -> [String] {
+        switch host {
+        case "api.ffzyapi.com":
+            return [
+                "https://cj.ffzyapi.com/api.php/provide/vod/from/ffm3u8/",
+                "https://cj.ffzyapi.com/api.php/provide/vod/"
             ]
         default:
             return []

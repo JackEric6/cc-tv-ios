@@ -8,6 +8,7 @@ enum SearchSourceGroup: Int, CaseIterable, Hashable, Identifiable {
     case baofeng
     case tiantang
     case liangzi
+    case ruyi
     case xintong
     case other
     case changzhang
@@ -26,6 +27,7 @@ enum SearchSourceGroup: Int, CaseIterable, Hashable, Identifiable {
         case .baofeng: return "暴风"
         case .tiantang: return "天堂"
         case .liangzi: return "量子"
+        case .ruyi: return "如意"
         case .xintong: return "鑫同"
         case .cheese: return "奶酪"
         case .nuomi: return "糯米"
@@ -88,6 +90,7 @@ enum SearchSourceGroup: Int, CaseIterable, Hashable, Identifiable {
         case "bfzy", "cms_baofeng", "baofeng": return .baofeng
         case "dyttzy", "dytt", "tiantang": return .tiantang
         case "lzi", "liangzi", "liangzizy": return .liangzi
+        case "ryzy", "ruyi": return .ruyi
         case "fhw88", "xintong": return .xintong
         case "fan_cheese", "cheese": return .cheese
         case "fan_nomi", "nuomi": return .nuomi
@@ -103,6 +106,7 @@ enum SearchSourceGroup: Int, CaseIterable, Hashable, Identifiable {
         if name.contains("暴风") { return .baofeng }
         if name.contains("天堂") { return .tiantang }
         if name.contains("量子") { return .liangzi }
+        if name.contains("如意") { return .ruyi }
         if name.contains("鑫同") { return .xintong }
         if name.contains("奶酪") { return .cheese }
         if name.contains("糯米") { return .nuomi }

@@ -41,10 +41,19 @@ jobs:
       - name: Verify source playback request headers
         run: |
           swiftc -parse-as-library \
+            tvbox/Models/CMSRequestHeaderPolicy.swift \
             tvbox/Models/PlaybackRequestHeaderPolicy.swift \
             scripts/verify-playback-request-headers.swift \
             -o /tmp/verify-playback-request-headers
           /tmp/verify-playback-request-headers
+
+      - name: Verify Android-compatible Jianpian origin discovery
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/JianpianOriginPolicy.swift \
+            scripts/verify-jianpian-origin.swift \
+            -o /tmp/verify-jianpian-origin
+          /tmp/verify-jianpian-origin
 
       - name: Verify Android-compatible playback line selection
         run: |

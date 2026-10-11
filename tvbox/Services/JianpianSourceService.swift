@@ -1,16 +1,10 @@
 import Foundation
 
 enum JianpianSourceService {
-    private static let origin = "https://fan123.hzhnl.com"
-    private static let headers = [
-        "Accept": "application/json",
-        "Referer": origin,
-        "User-Agent": "Mozilla/5.0 packageName:com.jp3.xg3"
-    ]
-
-    static func search(keyword: String) async throws -> [Movie.Video] {
+    static func search(keyword: String, preferredOrigin: String = JianpianOriginPolicy.preferredOrigin) async throws -> [Movie.Video] {
         let response = try await request(
             path: "/api/v2/search/videoV2",
+            preferredOrigin: preferredOrigin,
             query: [
                 URLQueryItem(name: "key", value: keyword),
                 URLQueryItem(name: "category_id", value: "88"),
@@ -26,9 +20,13 @@ enum JianpianSourceService {
         }
     }
 
-    static func detail(vodID: String) async throws -> VodInfo {
+    static func detail(
+        vodID: String,
+        preferredOrigin: String = JianpianOriginPolicy.preferredOrigin
+    ) async throws -> VodInfo {
         let response = try await request(
             path: "/api/video/detailv2",
+            preferredOrigin: preferredOrigin,
             query: [URLQueryItem(name: "id", value: vodID)]
         )
         let source = object(response["data"], wrappers: []) ?? response
@@ -51,18 +49,85 @@ enum JianpianSourceService {
         return VodInfo.from(video: video, playFrom: playFrom, playUrl: playURL)
     }
 
-    private static func request(path: String, query: [URLQueryItem]) async throws -> [String: Any] {
+    private static func request(
+        path: String,
+        preferredOrigin: String,
+        query: [URLQueryItem]
+    ) async throws -> [String: Any] {
+        let primary = JianpianOriginPolicy.normalize(preferredOrigin)
+            ?? JianpianOriginPolicy.preferredOrigin
+        do {
+            return try await requestAtOrigin(path: path, origin: primary, query: query, timeout: 10, retries: 1)
+        } catch {
+            guard shouldFailover(error) else { throw error }
+            let discovered = await discoverOrigins()
+            let candidates = JianpianOriginPolicy.candidates(
+                preferred: primary,
+                discoveredServers: discovered
+            ).dropFirst()
+            var lastError: Error = error
+            for origin in candidates {
+                do {
+                    return try await requestAtOrigin(path: path, origin: origin, query: query, timeout: 4, retries: 0)
+                } catch {
+                    guard shouldFailover(error) else { throw error }
+                    lastError = error
+                }
+            }
+            throw lastError
+        }
+    }
+
+    private static func shouldFailover(_ error: Error) -> Bool {
+        if let networkError = error as? NetworkError,
+           case .httpError(let statusCode) = networkError {
+            return JianpianOriginPolicy.shouldFailover(statusCode: statusCode)
+        }
+        if let sourceError = error as? SourceError,
+           case .invalidResponse("荐片接口响应格式无效") = sourceError {
+            return true
+        }
+        let value = error as NSError
+        return value.domain == NSURLErrorDomain && value.code != NSURLErrorCancelled
+    }
+
+    private static func requestAtOrigin(
+        path: String,
+        origin: String,
+        query: [URLQueryItem],
+        timeout: Int,
+        retries: Int
+    ) async throws -> [String: Any] {
         var components = URLComponents(string: origin + path)
         components?.queryItems = query
         guard let url = components?.url?.absoluteString else {
             throw SourceError.invalidApiUrl(origin + path)
         }
-        let text = try await NetworkManager.shared.getString(from: url, headers: headers, maxRetries: 1)
+        let headers = [
+            "Accept": "application/json",
+            "Referer": origin + "/",
+            "User-Agent": "Mozilla/5.0 packageName:com.jp3.xg3"
+        ]
+        let text = try await NetworkManager.shared.getString(
+            from: url,
+            headers: headers,
+            timeout: timeout,
+            maxRetries: retries
+        )
         guard let data = text.data(using: .utf8),
               let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw SourceError.invalidResponse("荐片接口响应格式无效")
         }
         return value
+    }
+
+    private static func discoverOrigins() async -> String {
+        (try? await NetworkManager.shared.getString(
+            from: JianpianOriginPolicy.discoveryURL,
+            headers: ["Accept": "text/plain,*/*"],
+            timeout: 3,
+            maxRetries: 0
+        )) ?? ""
     }
 
     private static func mapVideo(_ source: [String: Any]) -> Movie.Video {
@@ -91,7 +156,7 @@ enum JianpianSourceService {
         for element in value as? [Any] ?? [] {
             guard let route = object(element, wrappers: ["line", "provider"]) else { continue }
             let name = firstNonEmpty(string(route, keys: ["name", "source_name", "title"]), "荐片线路")
-            let routeEpisodes = episodes(from: route["source_list"] ?? route["episodes"])
+            let routeEpisodes = episodes(from: route["source_list"] ?? route["episodes"] ?? route["list"])
             guard !routeEpisodes.isEmpty else { continue }
             if let index = flags.firstIndex(of: name) {
                 let known = Set(lines[index].map(\.url))
@@ -109,7 +174,9 @@ enum JianpianSourceService {
         for element in value as? [Any] ?? [] {
             guard let episode = object(element, wrappers: ["episode", "item"]) else { continue }
             let url = string(episode, keys: ["url", "play_url", "playback_url", "media_url"])
-            guard !url.isEmpty, seen.insert(url).inserted else { continue }
+            guard let scheme = URLComponents(string: url)?.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  seen.insert(url).inserted else { continue }
             var name = string(episode, keys: ["source_name", "weight", "name", "title", "sort"])
             if name.isEmpty { name = "第\(result.count + 1)集" }
             else if Int(name) != nil { name = "第\(name)集" }

@@ -73,6 +73,7 @@ class DetailViewModel: ObservableObject {
     private var playableResolveTask: Task<Void, Never>?
     private var playableResolveToken = UUID()
     private var purifierFallbackURL: String?
+    private var activePlaybackHeaders: [String: String]?
     private var playbackStartupWatchdogTask: Task<Void, Never>?
     private var playbackStartupPosition: Double = 0
     /// 详情加载令牌，用于忽略已过期的渐进回调。
@@ -146,6 +147,7 @@ class DetailViewModel: ObservableObject {
         attemptedPlaybackFlags.removeAll()
         cancelPlaybackStartupWatchdog()
         purifierFallbackURL = nil
+        activePlaybackHeaders = nil
         let loadToken = UUID()
         detailLoadToken = loadToken
         initializedDetailLoadToken = nil
@@ -613,6 +615,7 @@ class DetailViewModel: ObservableObject {
             hasRealtimeProgressSnapshot = false
             pendingResumeProtection = nil
             resetQualityState()
+            activePlaybackHeaders = nil
             playableResolveTask?.cancel()
             playableResolveTask = nil
             playableResolveToken = UUID()
@@ -864,6 +867,7 @@ class DetailViewModel: ObservableObject {
         let requestEpisodeIndex = selectedEpisodeIndex
         cancelPlaybackStartupWatchdog()
         purifierFallbackURL = nil
+        activePlaybackHeaders = nil
 
         guard !isDirectPlayableURL(normalized, for: source) else {
             guard let selectedURL = selectedPlayableURL(fallback: normalized) else {
@@ -875,9 +879,10 @@ class DetailViewModel: ObservableObject {
             isResolvingPlaybackURL = true
             playableResolveTask = Task { [weak self, source, selectedURL, token, requestSourceKey, requestFlag, requestEpisodeIndex, normalized] in
                 guard let self else { return }
+                let headers = self.playbackHeaders(for: source, mediaURL: selectedURL)
                 let prepared = await M3U8Purifier.shared.prepare(
                     urlString: selectedURL,
-                    headers: self.playbackHeaders(for: source, mediaURL: selectedURL),
+                    headers: headers,
                     sourceKey: source.key
                 )
                 guard !Task.isCancelled,
@@ -885,6 +890,7 @@ class DetailViewModel: ObservableObject {
                       self.currentSource?.key == requestSourceKey,
                       self.selectedFlag == requestFlag,
                       self.selectedEpisodeIndex == requestEpisodeIndex else { return }
+                self.activePlaybackHeaders = headers
                 self.purifierFallbackURL = prepared.didPurify ? selectedURL : nil
                 self.playUrl = prepared.url
                 self.isPlaying = true
@@ -907,9 +913,9 @@ class DetailViewModel: ObservableObject {
         }
         playableResolveTask = Task { [weak self, source, normalized, token, requestSourceKey, requestFlag, requestEpisodeIndex] in
             guard let self else { return }
-            let resolved: String
+            let resolution: ResolvedPlaybackMedia
             do {
-                resolved = try await self.sourceService.resolvePlayableURL(sourceBean: source, url: normalized)
+                resolution = try await self.sourceService.resolvePlayableMedia(sourceBean: source, url: normalized)
             } catch {
                 guard !Task.isCancelled,
                       self.playableResolveToken == token,
@@ -930,7 +936,7 @@ class DetailViewModel: ObservableObject {
                   self.selectedFlag == requestFlag,
                   self.selectedEpisodeIndex == requestEpisodeIndex else { return }
 
-            let finalURL = KktvsResponseNormalizer.normalizeMediaURL(resolved)
+            let finalURL = KktvsResponseNormalizer.normalizeMediaURL(resolution.url)
             guard let validURL = SourceService.validPlayableURL(finalURL) else {
                 if self.advancePlaybackRouteAfterFailure() { return }
                 self.playUrl = nil
@@ -942,7 +948,7 @@ class DetailViewModel: ObservableObject {
             self.updateQualityOptions(for: validURL, resetSelection: true)
             let prepared = await M3U8Purifier.shared.prepare(
                 urlString: validURL,
-                headers: self.playbackHeaders(for: source, mediaURL: validURL),
+                headers: resolution.headers,
                 sourceKey: source.key
             )
             guard !Task.isCancelled,
@@ -950,6 +956,7 @@ class DetailViewModel: ObservableObject {
                   self.currentSource?.key == requestSourceKey,
                   self.selectedFlag == requestFlag,
                   self.selectedEpisodeIndex == requestEpisodeIndex else { return }
+            self.activePlaybackHeaders = resolution.headers
             self.purifierFallbackURL = prepared.didPurify ? validURL : nil
             self.playUrl = prepared.url
             self.isPlaying = true
@@ -966,6 +973,7 @@ class DetailViewModel: ObservableObject {
 
     var currentPlaybackHeaders: [String: String] {
         guard let source = currentSource, let mediaURL = currentResolvedMediaURL else { return [:] }
+        if let activePlaybackHeaders { return activePlaybackHeaders }
         return playbackHeaders(for: source, mediaURL: mediaURL)
     }
 
@@ -975,6 +983,7 @@ class DetailViewModel: ObservableObject {
     }
 
     func playbackHeaders(forPlayableURL mediaURL: String) -> [String: String] {
+        if let activePlaybackHeaders { return activePlaybackHeaders }
         guard let source = currentSource else { return [:] }
         return playbackHeaders(for: source, mediaURL: mediaURL)
     }

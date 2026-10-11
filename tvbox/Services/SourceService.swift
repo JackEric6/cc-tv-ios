@@ -1,5 +1,10 @@
 import Foundation
 
+struct ResolvedPlaybackMedia: Sendable {
+    let url: String
+    let headers: [String: String]
+}
+
 /// 视频源数据服务 - 对应 Android 版 SourceViewModel.java
 /// 负责从各视频源获取分类、列表、详情和搜索数据
 class SourceService {
@@ -352,7 +357,7 @@ class SourceService {
             )
         }
         if SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name) == .jianpian {
-            return try await JianpianSourceService.detail(vodID: vodId)
+            return try await JianpianSourceService.detail(vodID: vodId, preferredOrigin: sourceBean.api)
         }
         if SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name) == .changzhang {
             return try await Cz4kSourceService.detail(vodID: vodId)
@@ -468,7 +473,10 @@ class SourceService {
         }
         let searchGroup = SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name)
         if searchGroup == .jianpian {
-            return filterSearchResults(try await JianpianSourceService.search(keyword: keyword), keyword: keyword)
+            return filterSearchResults(
+                try await JianpianSourceService.search(keyword: keyword, preferredOrigin: sourceBean.api),
+                keyword: keyword
+            )
         }
         if searchGroup == .changzhang {
             return filterSearchResults(try await Cz4kSourceService.search(keyword: keyword), keyword: keyword)
@@ -540,6 +548,11 @@ class SourceService {
     /// 普通 CMS 源也可能返回播放器页（例如 `/play/...`），统一尝试提取
     /// 页面中的真实媒体地址；已经是 m3u8/mp4 等直链时保持原值。
     func resolvePlayableURL(sourceBean: SourceBean, url: String) async throws -> String {
+        let resolution = try await resolvePlayableMedia(sourceBean: sourceBean, url: url)
+        return resolution.url
+    }
+
+    func resolvePlayableMedia(sourceBean: SourceBean, url: String) async throws -> ResolvedPlaybackMedia {
         if sourceBean.key.caseInsensitiveCompare("guazi") == .orderedSame {
             guard let request = GuaziService.PlayRequest(url: url) else {
                 throw SourceError.invalidPlayableURL(url)
@@ -552,14 +565,15 @@ class SourceService {
             guard let playableURL = Self.validPlayableURL(mediaURL) else {
                 throw SourceError.invalidPlayableURL(mediaURL)
             }
-            return playableURL
+            return ResolvedPlaybackMedia(url: playableURL, headers: GuaziPlaybackRequest.playbackHeaders)
         }
 
         return try await resolvePlaybackPage(
             sourceBean: sourceBean,
             url: url,
             visited: [],
-            remainingPageHops: 3
+            remainingPageHops: 3,
+            parentPageURL: nil
         )
     }
 
@@ -567,16 +581,22 @@ class SourceService {
         sourceBean: SourceBean,
         url: String,
         visited: Set<String>,
-        remainingPageHops: Int
-    ) async throws -> String {
+        remainingPageHops: Int,
+        parentPageURL: String?
+    ) async throws -> ResolvedPlaybackMedia {
         let normalized = KktvsResponseNormalizer.normalizeMediaURL(url)
         guard let validURL = Self.validPlayableURL(normalized) else {
             throw SourceError.invalidPlayableURL(url)
         }
+        let requestHeaders = playbackHeaders(
+            for: sourceBean,
+            mediaURL: validURL,
+            refererOverride: parentPageURL
+        )
         let scheme = URLComponents(string: validURL)?.scheme?.lowercased()
         if KktvsResponseNormalizer.directMediaURL(normalized) != nil
             || !["http", "https"].contains(scheme ?? "") {
-            return validURL
+            return ResolvedPlaybackMedia(url: validURL, headers: requestHeaders)
         }
         guard remainingPageHops > 0 else {
             throw SourceError.invalidPlayableURL(validURL)
@@ -588,9 +608,16 @@ class SourceService {
 
         // 播放页通常是 HTML；有些资源站则用无扩展名 URL 直接返回 HLS 清单。
         // 先识别清单内容，再尝试播放器页提取，并限制跳转层数以防循环页面。
-        let response = try await getPlaybackPage(from: validURL, sourceBean: sourceBean)
+        let response = try await getPlaybackPage(
+            from: validURL,
+            sourceBean: sourceBean,
+            refererOverride: parentPageURL
+        )
         if KktvsResponseNormalizer.isHLSPlaylist(response.text) {
-            return response.finalURL.absoluteString
+            return ResolvedPlaybackMedia(
+                url: response.finalURL.absoluteString,
+                headers: requestHeaders
+            )
         }
         guard let extracted = KktvsResponseNormalizer.extractMediaURL(
                 from: response.text,
@@ -605,7 +632,8 @@ class SourceService {
             sourceBean: sourceBean,
             url: resolvedURL,
             visited: visited,
-            remainingPageHops: remainingPageHops - 1
+            remainingPageHops: remainingPageHops - 1,
+            parentPageURL: response.finalURL.absoluteString
         )
     }
 
@@ -920,9 +948,10 @@ class SourceService {
 
     private func getPlaybackPage(
         from url: String,
-        sourceBean: SourceBean
+        sourceBean: SourceBean,
+        refererOverride: String?
     ) async throws -> NetworkManager.StringResponse {
-        let headers = playbackHeaders(for: sourceBean, mediaURL: url)
+        let headers = playbackHeaders(for: sourceBean, mediaURL: url, refererOverride: refererOverride)
         return try await network.getStringResponse(
             from: url,
             headers: headers,
@@ -931,14 +960,19 @@ class SourceService {
         )
     }
 
-    func playbackHeaders(for sourceBean: SourceBean, mediaURL: String) -> [String: String] {
+    func playbackHeaders(
+        for sourceBean: SourceBean,
+        mediaURL: String,
+        refererOverride: String? = nil
+    ) -> [String: String] {
         var headers = defaultPlaybackHeaders()
         // Android applies its CMS playback UA and source Referer to both XML
         // and JSON CMS endpoints (type 0 and 1).
         if PlaybackRequestHeaderPolicy.appliesToCMSPlayback(sourceType: sourceBean.type) {
             headers = PlaybackRequestHeaderPolicy.applyingCMSPlaybackHeaders(
                 to: headers,
-                sourceKey: sourceBean.key
+                sourceKey: sourceBean.key,
+                sourceAPI: sourceBean.api
             )
         }
         if SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name) == .jianpian {
@@ -954,7 +988,7 @@ class SourceService {
                 .forEach { headers.removeValue(forKey: $0) }
             headers[key] = value
         }
-        return headers
+        return PlaybackRequestHeaderPolicy.applyingRefererOverride(refererOverride, to: headers)
     }
 
     private func defaultPlaybackHeaders() -> [String: String] {

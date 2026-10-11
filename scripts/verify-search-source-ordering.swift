@@ -24,6 +24,7 @@ struct VerifySearchSourceOrdering {
             Source(key: "fan_cheese", name: "奶酪", marker: "cheese"),
             Source(key: "dyttzy", name: "电影天堂", marker: "tiantang"),
             Source(key: "lzi", name: "量子", marker: "liangzi"),
+            Source(key: "ryzy", name: "如意", marker: "ruyi"),
             Source(key: "bfzy", name: "暴风", marker: "baofeng"),
             Source(key: "ffzy", name: "非凡", marker: "feifan")
         ]
@@ -35,11 +36,11 @@ struct VerifySearchSourceOrdering {
         )
         precondition(sorted.map(\.marker) == [
             "guazi", "jianpian", "jianpian-api", "xigua", "feifan", "baofeng", "tiantang",
-            "liangzi", "xintong", "other-a", "other-b", "360", "changzhang", "moli",
+            "liangzi", "ruyi", "xintong", "other-a", "other-b", "360", "changzhang", "moli",
             "cheese", "nuomi"
         ])
         precondition(SearchSourceGroup.allCases.map(\.title) == [
-            "瓜子", "荐片", "西瓜", "非凡", "暴风", "天堂", "量子", "鑫同", "其他", "厂长", "茉莉", "奶酪", "糯米"
+            "瓜子", "荐片", "西瓜", "非凡", "暴风", "天堂", "量子", "如意", "鑫同", "其他", "厂长", "茉莉", "奶酪", "糯米"
         ])
         precondition(SearchSourceGroup.displayName(sourceKey: "iqiyi", sourceName: "爱奇艺") == "奇艺")
         precondition(SearchSourceGroup.displayName(sourceKey: "xinlang", sourceName: "新浪资源") == "新浪")
@@ -51,6 +52,7 @@ struct VerifySearchSourceOrdering {
         precondition(SearchSourceGroup.classify(sourceKey: "legacy", sourceName: "鑫同采集") == .xintong)
         precondition(SearchSourceGroup.classify(sourceKey: "fan_cheese") == .cheese)
         precondition(SearchSourceGroup.classify(sourceKey: "fan_nomi") == .nuomi)
+        precondition(SearchSourceGroup.classify(sourceKey: "ryzy", sourceName: "如意") == .ruyi)
         precondition(SearchSourceGroup.classify(sourceKey: "cms_baofeng", sourceName: "暴风┃本地") == .baofeng)
         let cardA = Movie.Video(id: "7", name: "沉默的荣耀", sourceKey: "xgzy")
         let cardB = Movie.Video(id: "7", name: "沉默的荣耀", sourceKey: "ffzy")

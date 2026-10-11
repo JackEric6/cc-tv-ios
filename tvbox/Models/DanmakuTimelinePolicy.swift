@@ -1,6 +1,21 @@
 import Foundation
 
 enum DanmakuTimelinePolicy {
+    static func trackHeight(viewportHeight: Double) -> Double {
+        guard viewportHeight.isFinite, viewportHeight > 0 else { return 0 }
+        return min(viewportHeight, 44)
+    }
+
+    static func trackRegionHeight(
+        viewportHeight: Double,
+        rowCount: Int,
+        trackHeight: Double
+    ) -> Double {
+        guard viewportHeight.isFinite, viewportHeight > 0,
+              trackHeight.isFinite, trackHeight > 0 else { return 0 }
+        return min(viewportHeight, Double(max(1, rowCount)) * trackHeight)
+    }
+
     static func isPlaybackActive(isPlaying: Bool) -> Bool {
         isPlaying
     }
