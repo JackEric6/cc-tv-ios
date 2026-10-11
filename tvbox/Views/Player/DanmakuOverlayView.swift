@@ -213,7 +213,7 @@ final class DanmakuOverlayView: UIView {
 
     private func place(_ cue: DanmuCue, startTime: TimeInterval, at time: TimeInterval, duration: TimeInterval) {
         let size = max(12, min(36, CGFloat(cue.size) * settings.sizeScale))
-        let font = UIFont.systemFont(ofSize: size, weight: .regular)
+        let font = UIFont.systemFont(ofSize: size, weight: settings.fontWeight)
         let textWidth = (cue.text as NSString).size(withAttributes: [.font: font]).width
         let cueWidth = max(24, ceil(textWidth) + 8)
         let trajectory = DanmakuScrollTrajectory(
@@ -255,7 +255,7 @@ final class DanmakuOverlayView: UIView {
                 .font: font,
                 .foregroundColor: displayColor(for: cue).withAlphaComponent(opacity),
                 .strokeColor: UIColor.black.withAlphaComponent(opacity),
-                .strokeWidth: -4.0
+                .strokeWidth: -max(3.0, 4.0 + CGFloat(settings.fontWeightLevel) * 0.55)
             ]
         )
         timelineLayer.addSublayer(textLayer)
@@ -312,7 +312,7 @@ final class DanmakuOverlayView: UIView {
 
     private func displayDuration(for cue: DanmuCue) -> TimeInterval {
         let fontSize = max(12, min(36, CGFloat(cue.size) * settings.sizeScale))
-        let font = UIFont.systemFont(ofSize: fontSize, weight: .regular)
+        let font = UIFont.systemFont(ofSize: fontSize, weight: settings.fontWeight)
         let textSize = (cue.text as NSString).size(withAttributes: [.font: font])
         let cueWidth = max(24, ceil(textSize.width) + 8)
         return DanmakuTimelinePolicy.scrollingDuration(

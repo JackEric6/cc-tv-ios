@@ -21,7 +21,7 @@ struct VerifyPlaybackRequestHeaders {
             to: ["User-Agent": PlaybackRequestHeaderPolicy.androidDefaultUserAgent],
             sourceKey: "fhw88"
         )
-        precondition(xintongHeaders["Referer"] == nil)
+        precondition(xintongHeaders["Referer"] == "https://ffzy5.tv/")
 
         let sharedPageHeaders = PlaybackRequestHeaderPolicy.applyingRefererOverride(
             "https://vip.ffzy-plays.com/share/303d834ae7ba59a8233f9b0bd60998fe",
@@ -36,6 +36,43 @@ struct VerifyPlaybackRequestHeaders {
         )
         precondition(xiguaHeaders["Referer"] == "https://xgzy.tv/")
         precondition(xiguaHeaders["User-Agent"] == PlaybackRequestHeaderPolicy.androidCMSPlaybackUserAgent)
+        precondition(
+            PlaybackRequestHeaderPolicy.mediaRefererOverride(
+                sourceKey: "xgzy",
+                mediaURL: "https://svip.xgplay13.com/2025-09-30/token/index.m3u8"
+            ) == "https://svip.xgplay13.com/2025-09-30/token/"
+        )
+        precondition(
+            PlaybackRequestHeaderPolicy.mediaRefererOverride(
+                sourceKey: "xgzy",
+                mediaURL: "https://svip.xgplay13.com/2025-09-30/token/3000k/hls/mixed.m3u8"
+            ) == "https://svip.xgplay13.com/2025-09-30/token/"
+        )
+        precondition(
+            PlaybackRequestHeaderPolicy.mediaRefererOverride(
+                sourceKey: "modu",
+                mediaURL: "https://play.modujx11.com/20250930/token/index.m3u8"
+            ) == nil
+        )
+
+        let expectedSourceReferers = [
+            "zuida": "https://zuidazy.co/",
+            "bdzy": "https://bdzy.tv/",
+            "modu": "https://moduzy.com/",
+            "xinlang": "https://xinlangzy.com/",
+            "maoyan": "https://www.maoyanzy.com/",
+            "iqiyi": "https://iqiyizy.com/",
+            "suboziyuan": "https://www.suboziyuan.net/",
+            "haohua": "https://haohuazy.com/",
+            "fhw88": "https://ffzy5.tv/"
+        ]
+        for (sourceKey, expectedReferer) in expectedSourceReferers {
+            let headers = PlaybackRequestHeaderPolicy.applyingCMSPlaybackHeaders(
+                to: [:],
+                sourceKey: sourceKey
+            )
+            precondition(headers["Referer"] == expectedReferer, "missing playback Referer for \(sourceKey)")
+        }
 
         let xiguaCatalogReferer = CMSRequestHeaderPolicy.sourceReferer(
             for: "https://caiji.xgzyapi.com/api.php/provide/vod/"

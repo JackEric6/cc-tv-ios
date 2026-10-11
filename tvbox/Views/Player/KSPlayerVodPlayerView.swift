@@ -1912,12 +1912,15 @@ private struct KSPlayerUIView: UIViewRepresentable {
                     self.loadDanmaku(into: overlay)
                 }
             }
-            playerView.controllerView.addSubview(panel)
+            // 将弹窗安装在播放器根视图最上层，而不是控制栏内部；这样弹窗
+            // 覆盖的区域会先收到触摸，不会误触到底下的倍速、选集等控件。
+            playerView.addSubview(panel)
+            playerView.bringSubviewToFront(panel)
             NSLayoutConstraint.activate([
-                panel.leadingAnchor.constraint(equalTo: playerView.controllerView.leadingAnchor),
-                panel.trailingAnchor.constraint(equalTo: playerView.controllerView.trailingAnchor),
-                panel.topAnchor.constraint(equalTo: playerView.controllerView.topAnchor),
-                panel.bottomAnchor.constraint(equalTo: playerView.controllerView.bottomAnchor)
+                panel.leadingAnchor.constraint(equalTo: playerView.leadingAnchor),
+                panel.trailingAnchor.constraint(equalTo: playerView.trailingAnchor),
+                panel.topAnchor.constraint(equalTo: playerView.topAnchor),
+                panel.bottomAnchor.constraint(equalTo: playerView.bottomAnchor)
             ])
             danmakuSearchPanel = panel
             searchDanmakuResults(query: danmakuTitle, in: panel)
@@ -2041,12 +2044,13 @@ private struct KSPlayerUIView: UIViewRepresentable {
                 panel?.removeFromSuperview()
                 self?.danmakuSettingsPanel = nil
             }
-            playerView.controllerView.addSubview(panel)
+            playerView.addSubview(panel)
+            playerView.bringSubviewToFront(panel)
             NSLayoutConstraint.activate([
-                panel.leadingAnchor.constraint(equalTo: playerView.controllerView.leadingAnchor),
-                panel.trailingAnchor.constraint(equalTo: playerView.controllerView.trailingAnchor),
-                panel.topAnchor.constraint(equalTo: playerView.controllerView.topAnchor),
-                panel.bottomAnchor.constraint(equalTo: playerView.controllerView.bottomAnchor)
+                panel.leadingAnchor.constraint(equalTo: playerView.leadingAnchor),
+                panel.trailingAnchor.constraint(equalTo: playerView.trailingAnchor),
+                panel.topAnchor.constraint(equalTo: playerView.topAnchor),
+                panel.bottomAnchor.constraint(equalTo: playerView.bottomAnchor)
             ])
             danmakuSettingsPanel = panel
         }
@@ -2127,8 +2131,8 @@ private struct KSPlayerUIView: UIViewRepresentable {
                     toolbar.addArrangedSubview(arranged)
                 }
             }
-            toolbar.spacing = 3
-            toolbar.setCustomSpacing(4, after: toolbar.playbackRateButton)
+            toolbar.spacing = 1
+            toolbar.setCustomSpacing(1, after: toolbar.playbackRateButton)
             toolbar.playbackRateButton.setContentCompressionResistancePriority(.required, for: .horizontal)
             episodeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
             danmakuButton.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -2226,7 +2230,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             button.tintColor = .white
             button.accessibilityLabel = label
             button.translatesAutoresizingMaskIntoConstraints = false
-            ensureWidthConstraint(button, constant: 30, relation: .equal)
+            ensureWidthConstraint(button, constant: 28, relation: .equal)
             button.backgroundColor = .clear
             button.layer.backgroundColor = UIColor.clear.cgColor
             button.layer.shadowColor = UIColor.clear.cgColor
@@ -2252,7 +2256,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             button.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
             button.accessibilityLabel = label
             button.translatesAutoresizingMaskIntoConstraints = false
-            ensureWidthConstraint(button, constant: width, relation: .equal)
+            ensureWidthConstraint(button, constant: min(width, 34), relation: .equal)
             button.backgroundColor = .clear
             button.layer.backgroundColor = UIColor.clear.cgColor
             button.layer.shadowColor = UIColor.clear.cgColor
@@ -2272,7 +2276,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             button.accessibilityLabel = label
             button.accessibilityHint = "轻点设置当前时间，长按清除标记"
             button.translatesAutoresizingMaskIntoConstraints = false
-            ensureWidthConstraint(button, constant: 54, relation: .greaterThanOrEqual)
+            ensureWidthConstraint(button, constant: 48, relation: .greaterThanOrEqual)
             button.backgroundColor = .clear
             button.layer.backgroundColor = UIColor.clear.cgColor
             button.layer.shadowColor = UIColor.clear.cgColor
@@ -2296,13 +2300,14 @@ private struct KSPlayerUIView: UIViewRepresentable {
             constant: CGFloat,
             relation: NSLayoutConstraint.Relation
         ) {
-            let exists = button.constraints.contains {
+            if let existing = button.constraints.first(where: {
                 ($0.firstItem as? UIView) === button
                     && $0.firstAttribute == .width
                     && $0.relation == relation
-                    && abs($0.constant - constant) < 0.01
+            }) {
+                existing.constant = constant
+                return
             }
-            guard !exists else { return }
             let constraint = relation == .equal
                 ? button.widthAnchor.constraint(equalToConstant: constant)
                 : button.widthAnchor.constraint(greaterThanOrEqualToConstant: constant)

@@ -3,6 +3,15 @@ import Foundation
 enum PlaybackRequestHeaderPolicy {
     private static let cmsSourceReferers: [String: String] = [
         "xgzy": "https://xgzy.tv/",
+        "zuida": "https://zuidazy.co/",
+        "bdzy": "https://bdzy.tv/",
+        "modu": "https://moduzy.com/",
+        "xinlang": "https://xinlangzy.com/",
+        "maoyan": "https://www.maoyanzy.com/",
+        "iqiyi": "https://iqiyizy.com/",
+        "suboziyuan": "https://www.suboziyuan.net/",
+        "haohua": "https://haohuazy.com/",
+        "fhw88": "https://ffzy5.tv/",
         "ffzy": "https://ffzy5.tv/",
         "lzi": "https://lzizy.net/",
         "sony": "https://suonizy.net/",
@@ -71,6 +80,42 @@ enum PlaybackRequestHeaderPolicy {
             result["Referer"] = referer
         }
         return result
+    }
+
+    static func xiguaMediaReferer(for mediaURL: String) -> String? {
+        guard let components = URLComponents(string: mediaURL),
+              ["http", "https"].contains(components.scheme?.lowercased() ?? ""),
+              components.host != nil,
+              components.percentEncodedPath.localizedCaseInsensitiveContains(".m3u8") else {
+            return nil
+        }
+
+        var pathComponents = components.percentEncodedPath
+            .split(separator: "/")
+            .map(String.init)
+        if pathComponents.count >= 3,
+           pathComponents.suffix(3).map({ $0.lowercased() }) == ["3000k", "hls", "mixed.m3u8"] {
+            pathComponents.removeLast(3)
+        } else if !pathComponents.isEmpty {
+            pathComponents.removeLast()
+        }
+
+        var referer = components
+        referer.percentEncodedPath = "/" + pathComponents.joined(separator: "/")
+        if !referer.percentEncodedPath.hasSuffix("/") {
+            referer.percentEncodedPath += "/"
+        }
+        referer.query = nil
+        referer.fragment = nil
+        return referer.url?.absoluteString
+    }
+
+    static func mediaRefererOverride(sourceKey: String, mediaURL: String) -> String? {
+        guard sourceKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare("xgzy") == .orderedSame else {
+            return nil
+        }
+        return xiguaMediaReferer(for: mediaURL)
     }
 
     static func applyingSourceSpecificPlaybackHeaders(

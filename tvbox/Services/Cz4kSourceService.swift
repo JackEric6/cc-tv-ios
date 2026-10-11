@@ -88,7 +88,14 @@ enum Cz4kSourceService {
                   let bodyRange = Range(match.range(at: 2), in: html) else { continue }
             let attrs = String(html[attrsRange])
             let body = String(html[bodyRange])
-            guard let href = attribute("href", in: attrs),
+            let href = firstNonEmpty(
+                attribute("href", in: attrs),
+                attribute("data-href", in: attrs),
+                attribute("data-url", in: attrs),
+                attribute("data-play", in: attrs),
+                firstCapture(#"(?is)(?:play|url|video)\s*\(\s*[\"']([^\"']+)[\"']"#, in: attrs, group: 1)
+            )
+            guard !href.isEmpty,
                   let episodeURL = resolvedURL(href, relativeTo: url),
                   isPlayableURL(episodeURL), seen.insert(episodeURL.absoluteString).inserted else { continue }
             let name = firstNonEmpty(attribute("title", in: attrs), text(body), "第\(episodes.count + 1)集")
@@ -120,9 +127,16 @@ enum Cz4kSourceService {
 
     private static func isPlayableURL(_ url: URL) -> Bool {
         let path = url.path.lowercased()
-        return path.contains("/play") || path.contains("/vodplay") || path.contains("/vod-play")
+        if path.contains("/play") || path.contains("/vodplay") || path.contains("/vod-play")
             || path.contains("/playmov") || path.contains("/player")
-            || path.contains("/v_play/") || path.hasSuffix(".m3u8") || path.hasSuffix(".mp4")
+            || path.contains("/v_play/") || path.contains("/watch")
+            || path.contains("/episode") || path.contains("/video/")
+            || path.hasSuffix(".m3u8") || path.hasSuffix(".mp4") {
+            return true
+        }
+        return (URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []).contains { item in
+            ["url", "play", "playurl", "video", "vid"].contains(item.name.lowercased())
+        }
     }
 
     private static func attribute(_ name: String, in value: String) -> String? {

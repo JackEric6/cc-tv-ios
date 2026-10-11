@@ -7,7 +7,13 @@ public final class DanmuService {
     public static let builtinAPI = "https://logvardanmu.konfan.cn/87654321"
     private static let searchRequestTimeout = 12
     private static let commentRequestTimeout = 18
-    private static let requestRetryCount = 1
+    // A danmaku request is small, so one short retry is not enough when the
+    // device is switching networks or the API briefly returns 502/429.
+    private static let requestRetryCount = 2
+    private static let retryBaseDelay: TimeInterval = 0.35
+    private static let retryMaxDelay: TimeInterval = 2.5
+    private static let cacheLifetime: TimeInterval = 300
+    private static let emptyCacheLifetime: TimeInterval = 20
 
     public struct Configuration: Sendable, Equatable {
         public var apiURL: String?
@@ -19,14 +25,25 @@ public final class DanmuService {
         }
     }
 
-    private let network = NetworkManager.shared
     private let customSession: URLSession
+    private var searchCache: [String: (date: Date, results: [DanmuSearchResult], hadError: Bool)] = [:]
+    private var cueCache: [String: (date: Date, cues: [DanmuCue])] = [:]
+    private var searchInFlight: [String: Task<[DanmuSearchResult], Error>] = [:]
+    private var cueInFlight: [String: Task<[DanmuCue], Error>] = [:]
 
     private init() {
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 20
         configuration.timeoutIntervalForResource = 30
-        configuration.waitsForConnectivity = true
+        // Danmaku is independent from video-source connectivity. Waiting for a
+        // stalled source request here made the search appear to fail whenever
+        // a playback route was offline.
+        configuration.waitsForConnectivity = false
+        configuration.httpMaximumConnectionsPerHost = 8
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
         customSession = URLSession(configuration: configuration)
     }
 
@@ -37,7 +54,9 @@ public final class DanmuService {
         episode: String,
         configuration: Configuration = Configuration()
     ) async -> [DanmuCue] {
-        for apiURL in resolveAPIURLs(configuration) {
+        var apiURLs = resolveAPIURLs(configuration)
+        apiURLs.sort { Self.isBuiltinAPI($0) && !Self.isBuiltinAPI($1) }
+        for apiURL in apiURLs {
             do {
                 let cues: [DanmuCue]
                 if Self.isBuiltinAPI(apiURL) {
@@ -112,9 +131,44 @@ public final class DanmuService {
     ) async throws -> [DanmuSearchResult] {
         let query = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return [] }
+        let apiFingerprint = resolveAPIURLs(configuration)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .joined(separator: "|")
+        let cacheKey = "\(query.lowercased())\u{1F}\(episode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())\u{1E}\(apiFingerprint)"
+        if let cached = searchCache[cacheKey] {
+            let lifetime = cached.hadError ? Self.emptyCacheLifetime : Self.cacheLifetime
+            if Date().timeIntervalSince(cached.date) < lifetime {
+                return cached.results
+            }
+        }
+        // Auto-loading and the manual search panel can ask for the same title
+        // at nearly the same time. Share one request instead of creating two
+        // independent timeout/retry chains against the danmaku service.
+        if let task = searchInFlight[cacheKey] {
+            return try await task.value
+        }
+        let task = Task<[DanmuSearchResult], Error> { @MainActor [weak self] in
+            guard let self else { return [] }
+            return try await self.performSearchResults(query: query, episode: episode, configuration: configuration, cacheKey: cacheKey)
+        }
+        searchInFlight[cacheKey] = task
+        defer { searchInFlight[cacheKey] = nil }
+        return try await task.value
+    }
+
+    private func performSearchResults(
+        query: String,
+        episode: String,
+        configuration: Configuration,
+        cacheKey: String
+    ) async throws -> [DanmuSearchResult] {
         var results: [DanmuSearchResult] = []
         var lastError: Error?
-        for apiURL in resolveAPIURLs(configuration) {
+        var apiURLs = resolveAPIURLs(configuration)
+        // The built-in Android-compatible API is the most stable path. Try it
+        // first so a stale custom endpoint cannot block search for a full timeout.
+        apiURLs.sort { Self.isBuiltinAPI($0) && !Self.isBuiltinAPI($1) }
+        for apiURL in apiURLs {
             do {
                 let apiResults: [DanmuSearchResult]
                 if Self.isBuiltinAPI(apiURL) {
@@ -135,13 +189,39 @@ public final class DanmuService {
         }
         var seen = Set<String>()
         let uniqueResults = results.filter { seen.insert($0.url).inserted }
-        if !uniqueResults.isEmpty { return uniqueResults }
+        // Cache both hits and misses. A temporary API outage should not make
+        // every keystroke or player re-appearance wait through the full retry
+        // budget again.
+        pruneCachesIfNeeded()
+        searchCache[cacheKey] = (Date(), uniqueResults, uniqueResults.isEmpty && lastError != nil)
+        if !uniqueResults.isEmpty {
+            return uniqueResults
+        }
         if let lastError { throw lastError }
         return []
     }
 
     public func loadSearchResult(_ result: DanmuSearchResult) async throws -> [DanmuCue] {
         guard let url = result.url.trimmedNonEmpty else { return [] }
+        if let cached = cueCache[url] {
+            let lifetime = cached.cues.isEmpty ? Self.emptyCacheLifetime : Self.cacheLifetime
+            if Date().timeIntervalSince(cached.date) < lifetime {
+                return cached.cues
+            }
+        }
+        if let task = cueInFlight[url] {
+            return try await task.value
+        }
+        let task = Task<[DanmuCue], Error> { @MainActor [weak self] in
+            guard let self else { return [] }
+            return try await self.performLoadSearchResult(result, cacheKey: url)
+        }
+        cueInFlight[url] = task
+        defer { cueInFlight[url] = nil }
+        return try await task.value
+    }
+
+    private func performLoadSearchResult(_ result: DanmuSearchResult, cacheKey url: String) async throws -> [DanmuCue] {
         var urls = [url]
         if result.isBuiltin, var components = URLComponents(string: url) {
             let filteredItems = components.queryItems?.filter { $0.name != "format" } ?? []
@@ -154,26 +234,59 @@ public final class DanmuService {
         }
         for candidateURL in urls {
             try Task.checkCancellation()
-            guard let body = try? await network.getString(
+            guard let body = try? await getDanmakuText(
                 from: candidateURL,
-                timeout: Self.commentRequestTimeout,
-                maxRetries: Self.requestRetryCount
+                timeout: Self.commentRequestTimeout
             ) else {
                 continue
             }
             let cues = try await Self.parseOffMain(body)
-            if !cues.isEmpty { return cues }
+            if !cues.isEmpty {
+                pruneCachesIfNeeded()
+                cueCache[url] = (Date(), cues)
+                return cues
+            }
             if let nestedURL = Self.extractURL(from: body), nestedURL != candidateURL,
-               let nestedBody = try? await network.getString(
+               let nestedBody = try? await getDanmakuText(
                 from: nestedURL,
-                timeout: Self.commentRequestTimeout,
-                maxRetries: Self.requestRetryCount
+                timeout: Self.commentRequestTimeout
                ) {
                 let nestedCues = try await Self.parseOffMain(nestedBody)
-                if !nestedCues.isEmpty { return nestedCues }
+                if !nestedCues.isEmpty {
+                    pruneCachesIfNeeded()
+                    cueCache[url] = (Date(), nestedCues)
+                    return nestedCues
+                }
+            }
+            if !cues.isEmpty {
+                pruneCachesIfNeeded()
+                cueCache[url] = (Date(), cues)
+                return cues
             }
         }
+        // An empty result is cached as well, preventing quick repeated taps on
+        // a dead result from opening several long-lived connections.
+        pruneCachesIfNeeded()
+        cueCache[url] = (Date(), [])
         return []
+    }
+
+    private func pruneCachesIfNeeded() {
+        let maxEntries = 80
+        if searchCache.count >= maxEntries {
+            let keys = searchCache
+                .sorted { $0.value.date < $1.value.date }
+                .prefix(searchCache.count - maxEntries + 1)
+                .map(\.key)
+            keys.forEach { searchCache.removeValue(forKey: $0) }
+        }
+        if cueCache.count >= maxEntries {
+            let keys = cueCache
+                .sorted { $0.value.date < $1.value.date }
+                .prefix(cueCache.count - maxEntries + 1)
+                .map(\.key)
+            keys.forEach { cueCache.removeValue(forKey: $0) }
+        }
     }
 
     private func loadFirstAvailable(_ results: [DanmuSearchResult]) async -> [DanmuCue] {
@@ -193,6 +306,8 @@ public final class DanmuService {
 
     private func searchBuiltinResults(baseURL: String, query: String) async throws -> [DanmuSearchResult] {
         var results: [DanmuSearchResult] = []
+        var hadSuccessfulResponse = false
+        var lastError: Error?
         for variant in Self.searchTitleVariants(query) {
             try Task.checkCancellation()
             let episodesURL = try Self.makeURL(
@@ -200,12 +315,17 @@ public final class DanmuService {
                 path: "/api/v2/search/episodes",
                 queryItems: [URLQueryItem(name: "anime", value: variant)]
             )
-            if let body = try? await network.getString(
-                from: episodesURL.absoluteString,
-                timeout: Self.searchRequestTimeout,
-                maxRetries: Self.requestRetryCount
-            ) {
+            do {
+                let body = try await getDanmakuText(
+                    from: episodesURL.absoluteString,
+                    timeout: Self.searchRequestTimeout
+                )
+                hadSuccessfulResponse = true
                 results.append(contentsOf: Self.parseBuiltinSearchResults(body, baseURL: baseURL))
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
             }
             if !results.isEmpty { break }
         }
@@ -216,29 +336,38 @@ public final class DanmuService {
                 path: "/api/v2/search/anime",
                 queryItems: [URLQueryItem(name: "keyword", value: variant)]
             )
-            if let body = try? await network.getString(
-                from: animeURL.absoluteString,
-                timeout: Self.searchRequestTimeout,
-                maxRetries: Self.requestRetryCount
-            ) {
+            do {
+                let body = try await getDanmakuText(
+                    from: animeURL.absoluteString,
+                    timeout: Self.searchRequestTimeout
+                )
+                hadSuccessfulResponse = true
                 for animeID in Self.findAnimeIDs(in: body).prefix(5) {
                     try Task.checkCancellation()
                     guard let bangumiURL = try? Self.makeURL(
                         baseURL: baseURL,
                         path: "/api/v2/bangumi/\(Self.urlPathEscape(animeID))",
                         queryItems: []
-                    ), let bangumi = try? await network.getString(
+                    ) else { continue }
+                    guard let bangumi = try? await getDanmakuText(
                         from: bangumiURL.absoluteString,
-                        timeout: Self.searchRequestTimeout,
-                        maxRetries: Self.requestRetryCount
+                        timeout: Self.searchRequestTimeout
                     ) else { continue }
                     results.append(contentsOf: Self.parseBuiltinSearchResults(bangumi, baseURL: baseURL))
                 }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
             }
         }
 
         var seen = Set<String>()
-        return results.filter { seen.insert($0.url).inserted }
+        let uniqueResults = results.filter { seen.insert($0.url).inserted }
+        if uniqueResults.isEmpty, !hadSuccessfulResponse, let lastError {
+            throw lastError
+        }
+        return uniqueResults
     }
 
     private static func parseSearchResults(_ body: String) -> [DanmuSearchResult] {
@@ -345,10 +474,9 @@ public final class DanmuService {
                         query.isEmpty ? nil : URLQueryItem(name: "episode", value: query)
                     ].compactMap { $0 }
                 )
-                guard let body = try? await network.getString(
+                guard let body = try? await getDanmakuText(
                     from: searchURL.absoluteString,
-                    timeout: Self.searchRequestTimeout,
-                    maxRetries: Self.requestRetryCount
+                    timeout: Self.searchRequestTimeout
                 ) else {
                     continue
                 }
@@ -367,10 +495,9 @@ public final class DanmuService {
             path: "/api/v2/search/anime",
             queryItems: [URLQueryItem(name: "keyword", value: titleVariants.first ?? title)]
         )
-        guard let animeBody = try? await network.getString(
+        guard let animeBody = try? await getDanmakuText(
             from: animeURL.absoluteString,
-            timeout: Self.searchRequestTimeout,
-            maxRetries: Self.requestRetryCount
+            timeout: Self.searchRequestTimeout
         ) else {
             return []
         }
@@ -382,10 +509,9 @@ public final class DanmuService {
                 path: "/api/v2/bangumi/\(Self.urlPathEscape(animeID))",
                 queryItems: []
             )
-            guard let bangumiBody = try? await network.getString(
+            guard let bangumiBody = try? await getDanmakuText(
                 from: bangumiURL.absoluteString,
-                timeout: Self.searchRequestTimeout,
-                maxRetries: Self.requestRetryCount
+                timeout: Self.searchRequestTimeout
             ) else {
                 continue
             }
@@ -409,10 +535,9 @@ public final class DanmuService {
         ]
         for (path, queryItems) in paths {
             guard let commentURL = try? Self.makeURL(baseURL: baseURL, path: path, queryItems: queryItems),
-                  let comments = try? await network.getString(
+                  let comments = try? await getDanmakuText(
                     from: commentURL.absoluteString,
-                    timeout: Self.commentRequestTimeout,
-                    maxRetries: Self.requestRetryCount
+                    timeout: Self.commentRequestTimeout
                   ) else {
                 continue
             }
@@ -420,6 +545,98 @@ public final class DanmuService {
             if !cues.isEmpty { return cues }
         }
         return []
+    }
+
+    private func getDanmakuText(
+        from urlString: String,
+        timeout: Int,
+        method: String = "GET",
+        body: Data? = nil
+    ) async throws -> String {
+        guard let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            throw NetworkError.invalidURL(urlString)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.httpBody = body
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = TimeInterval(max(3, timeout))
+        request.httpShouldHandleCookies = false
+        request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile Safari/604.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json,text/plain,*/*", forHTTPHeaderField: "Accept")
+        request.setValue("zh-CN,zh;q=0.9,en;q=0.7", forHTTPHeaderField: "Accept-Language")
+        if body != nil {
+            request.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        }
+        var lastError: Error?
+        for attempt in 0...Self.requestRetryCount {
+            do {
+                try Task.checkCancellation()
+                let (data, response) = try await customSession.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    throw NetworkError.invalidResponse
+                }
+                guard (200...299).contains(http.statusCode) else {
+                    throw NetworkError.httpError(http.statusCode)
+                }
+                return Self.decodeText(data: data, response: http)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
+                if attempt < Self.requestRetryCount, Self.shouldRetry(error) {
+                    let exponential = min(
+                        Self.retryBaseDelay * pow(2.0, Double(attempt)),
+                        Self.retryMaxDelay
+                    )
+                    let jitter = Double.random(in: 0...0.2)
+                    try await Task.sleep(nanoseconds: UInt64((exponential + jitter) * 1_000_000_000))
+                }
+            }
+        }
+        throw lastError ?? NetworkError.invalidResponse
+    }
+
+    private static func shouldRetry(_ error: Error) -> Bool {
+        if let networkError = error as? NetworkError {
+            if case .httpError(let status) = networkError {
+                return [408, 425, 429, 500, 502, 503, 504].contains(status)
+            }
+            return false
+        }
+        let nsError = error as NSError
+        guard nsError.domain == NSURLErrorDomain else { return false }
+        return [
+            NSURLErrorTimedOut,
+            NSURLErrorCannotFindHost,
+            NSURLErrorCannotConnectToHost,
+            NSURLErrorNetworkConnectionLost,
+            NSURLErrorDNSLookupFailed,
+            NSURLErrorNotConnectedToInternet,
+            NSURLErrorSecureConnectionFailed,
+            NSURLErrorDataNotAllowed
+        ].contains(nsError.code)
+    }
+
+    private static func decodeText(data: Data, response: HTTPURLResponse) -> String {
+        if let charset = response.textEncodingName,
+           let encoding = encoding(fromIANACharset: charset),
+           let value = String(data: data, encoding: encoding) {
+            return value
+        }
+        for charset in ["utf-8", "gb18030", "gbk", "gb2312", "utf-16"] {
+            if let encoding = encoding(fromIANACharset: charset),
+               let value = String(data: data, encoding: encoding) {
+                return value
+            }
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func encoding(fromIANACharset charset: String) -> String.Encoding? {
+        let cfEncoding = CFStringConvertIANACharSetNameToEncoding(charset as CFString)
+        guard cfEncoding != kCFStringEncodingInvalidId else { return nil }
+        return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(cfEncoding))
     }
 
     private func loadCustom(
@@ -434,25 +651,19 @@ public final class DanmuService {
             let replaced = apiURL
                 .replacingOccurrences(of: "{name}", with: Self.urlQueryEscape(name))
                 .replacingOccurrences(of: "{episode}", with: Self.urlQueryEscape(episodeValue))
-            return try await network.getString(from: replaced)
+            return try await getDanmakuText(from: replaced, timeout: Self.searchRequestTimeout)
         }
 
-        guard let url = URL(string: apiURL) else { throw NetworkError.invalidURL(apiURL) }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        guard URL(string: apiURL) != nil else { throw NetworkError.invalidURL(apiURL) }
         let formBody = "name=\(Self.urlQueryEscape(name))&episode=\(Self.urlQueryEscape(episodeValue))"
-        request.httpBody = formBody.data(using: .utf8)
-
-        let (data, response) = try await customSession.data(for: request)
-        try Task.checkCancellation()
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
-            throw NetworkError.invalidResponse
-        }
-        let body = String(decoding: data, as: UTF8.self)
+        let body = try await getDanmakuText(
+            from: apiURL,
+            timeout: Self.searchRequestTimeout,
+            method: "POST",
+            body: formBody.data(using: .utf8)
+        )
         if followURL, let nestedURL = Self.extractURL(from: body), nestedURL != apiURL {
-            return try await network.getString(from: nestedURL)
+            return try await getDanmakuText(from: nestedURL, timeout: Self.commentRequestTimeout)
         }
         return body
     }

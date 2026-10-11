@@ -6,10 +6,28 @@ struct DanmakuDisplaySettings: Codable, Equatable {
     var randomColors = false
     var speedLevel = 2
     var sizeLevel = 8
+    var fontWeightLevel = 2
     var rowCount = 3
     var opacity = 90
 
     static let storageKey = "danmaku_display_settings"
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled, randomColors, speedLevel, sizeLevel, fontWeightLevel, rowCount, opacity
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try values.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        randomColors = try values.decodeIfPresent(Bool.self, forKey: .randomColors) ?? false
+        speedLevel = try values.decodeIfPresent(Int.self, forKey: .speedLevel) ?? 2
+        sizeLevel = try values.decodeIfPresent(Int.self, forKey: .sizeLevel) ?? 8
+        fontWeightLevel = try values.decodeIfPresent(Int.self, forKey: .fontWeightLevel) ?? 2
+        rowCount = try values.decodeIfPresent(Int.self, forKey: .rowCount) ?? 3
+        opacity = try values.decodeIfPresent(Int.self, forKey: .opacity) ?? 90
+    }
 
     static func load() -> DanmakuDisplaySettings {
         guard let data = UserDefaults.standard.data(forKey: storageKey),
@@ -28,6 +46,7 @@ struct DanmakuDisplaySettings: Codable, Equatable {
         var value = self
         value.speedLevel = min(max(speedLevel, 0), 3)
         value.sizeLevel = min(max(sizeLevel, 1), 16)
+        value.fontWeightLevel = min(max(fontWeightLevel, 0), 4)
         value.rowCount = min(max(rowCount, 1), 8)
         value.opacity = min(max(opacity / 10 * 10, 10), 100)
         return value
@@ -39,6 +58,14 @@ struct DanmakuDisplaySettings: Codable, Equatable {
 
     var sizeScale: CGFloat {
         CGFloat(normalized.sizeLevel) / 10
+    }
+
+    var fontWeightLabel: String {
+        ["标准", "略粗", "中粗", "粗", "特粗"][normalized.fontWeightLevel]
+    }
+
+    var fontWeight: UIFont.Weight {
+        [.regular, .medium, .semibold, .bold, .heavy][normalized.fontWeightLevel]
     }
 }
 
@@ -53,6 +80,7 @@ final class DanmakuSettingsPanelView: UIView {
     private let colorControl = UISegmentedControl(items: ["默认", "随机"])
     private let speedControl = UISegmentedControl(items: ["超慢", "慢", "适中", "快"])
     private let sizeValue = UILabel()
+    private let fontWeightValue = UILabel()
     private let rowValue = UILabel()
     private let opacityValue = UILabel()
     private let statusLabel = UILabel()
@@ -173,6 +201,7 @@ final class DanmakuSettingsPanelView: UIView {
         contentStack.addArrangedSubview(makeRow("弹幕颜色", trailing: colorControl))
         contentStack.addArrangedSubview(makeRow("弹幕速度", trailing: speedControl))
         contentStack.addArrangedSubview(makeStepperRow("弹幕大小", value: sizeValue, minus: #selector(sizeDown), plus: #selector(sizeUp)))
+        contentStack.addArrangedSubview(makeStepperRow("字体粗细", value: fontWeightValue, minus: #selector(fontWeightDown), plus: #selector(fontWeightUp)))
         contentStack.addArrangedSubview(makeStepperRow("弹幕行数", value: rowValue, minus: #selector(rowsDown), plus: #selector(rowsUp)))
         contentStack.addArrangedSubview(makeStepperRow("弹幕透明", value: opacityValue, minus: #selector(opacityDown), plus: #selector(opacityUp)))
 
@@ -253,6 +282,7 @@ final class DanmakuSettingsPanelView: UIView {
         colorControl.selectedSegmentIndex = value.randomColors ? 1 : 0
         speedControl.selectedSegmentIndex = value.speedLevel
         sizeValue.text = "\(value.sizeLevel) 档"
+        fontWeightValue.text = value.fontWeightLabel
         rowValue.text = "\(value.rowCount) 行"
         opacityValue.text = "\(value.opacity)%"
         statusLabel.text = statusText
@@ -282,6 +312,8 @@ final class DanmakuSettingsPanelView: UIView {
 
     @objc private func sizeDown() { settings.sizeLevel -= 1; commit() }
     @objc private func sizeUp() { settings.sizeLevel += 1; commit() }
+    @objc private func fontWeightDown() { settings.fontWeightLevel -= 1; commit() }
+    @objc private func fontWeightUp() { settings.fontWeightLevel += 1; commit() }
     @objc private func rowsDown() { settings.rowCount -= 1; commit() }
     @objc private func rowsUp() { settings.rowCount += 1; commit() }
     @objc private func opacityDown() { settings.opacity -= 10; commit() }

@@ -1011,7 +1011,12 @@ class SourceService {
                 .forEach { headers.removeValue(forKey: $0) }
             headers[key] = value
         }
-        return PlaybackRequestHeaderPolicy.applyingRefererOverride(refererOverride, to: headers)
+        let inheritedReferer = refererOverride
+            ?? PlaybackRequestHeaderPolicy.mediaRefererOverride(
+                sourceKey: sourceBean.key,
+                mediaURL: mediaURL
+            )
+        return PlaybackRequestHeaderPolicy.applyingRefererOverride(inheritedReferer, to: headers)
     }
 
     private func defaultPlaybackHeaders() -> [String: String] {
