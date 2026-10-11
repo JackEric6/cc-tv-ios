@@ -344,6 +344,33 @@ struct VerifyM3U8Purifier {
         precondition(ambiguousFrameRateResult.removedSegmentCount == 0)
         precondition(ambiguousFrameRateResult.content.contains("block-1.ts"))
 
+        // Android's cleanUniformDurationGroups rule: repeated short blocks
+        // with a different, uniform cadence are removed only when the main
+        // cadence is dominant and the removal remains within safety limits.
+        var uniformLines = ["#EXTM3U", "#EXT-X-TARGETDURATION:6"]
+        for group in 0..<7 {
+            if group > 0 { uniformLines.append("#EXT-X-DISCONTINUITY") }
+            for index in 0..<4 {
+                uniformLines.append("#EXTINF:4.000,")
+                uniformLines.append("https://cdn.example/video/main-\(group)-\(index).ts")
+            }
+        }
+        for block in ["a", "b"] {
+            uniformLines.append("#EXT-X-DISCONTINUITY")
+            for index in 0..<3 {
+                uniformLines.append("#EXTINF:2.000,")
+                uniformLines.append("https://cdn.example/video/ad-\(block)-\(index).ts")
+            }
+        }
+        uniformLines.append("#EXT-X-ENDLIST")
+        let uniformResult = M3U8ManifestPurifier.purify(
+            baseURL: URL(string: "https://cdn.example/video/index.m3u8")!,
+            content: uniformLines.joined(separator: "\n")
+        )
+        precondition(uniformResult.removedSegmentCount == 6)
+        precondition(!uniformResult.content.contains("ad-a-0.ts"))
+        precondition(!uniformResult.content.contains("ad-b-0.ts"))
+
         let originalGuaziURL = "https://guazi.example/video/index.m3u8?token=original"
         let requestsBeforeGuazi = NetworkManager.shared.requestCount
         let guaziResult = await M3U8Purifier.shared.prepare(

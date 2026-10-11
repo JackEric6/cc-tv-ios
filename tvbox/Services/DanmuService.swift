@@ -185,7 +185,8 @@ public final class DanmuService {
                 if Self.isBuiltinAPI(apiURL) {
                     apiResults = try await searchBuiltinResults(
                         baseURL: Self.normalizeBaseURL(apiURL),
-                        query: query
+                        query: query,
+                        episode: episode
                     )
                 } else {
                     let body = try await loadCustom(apiURL: apiURL, title: query, episode: episode, followURL: false)
@@ -315,28 +316,40 @@ public final class DanmuService {
         return []
     }
 
-    private func searchBuiltinResults(baseURL: String, query: String) async throws -> [DanmuSearchResult] {
+    private func searchBuiltinResults(
+        baseURL: String,
+        query: String,
+        episode: String
+    ) async throws -> [DanmuSearchResult] {
         var results: [DanmuSearchResult] = []
         var hadSuccessfulResponse = false
         var lastError: Error?
+        let episodeNumber = Self.extractEpisodeNumber(episode)
+        let episodeQueries = episodeNumber > 0 ? [String(episodeNumber), ""] : [""]
         for variant in Self.searchTitleVariants(query) {
-            try Task.checkCancellation()
-            let episodesURL = try Self.makeURL(
-                baseURL: baseURL,
-                path: "/api/v2/search/episodes",
-                queryItems: [URLQueryItem(name: "anime", value: variant)]
-            )
-            do {
-                let body = try await getDanmakuText(
-                    from: episodesURL.absoluteString,
-                    timeout: Self.searchRequestTimeout
+            for episodeQuery in episodeQueries {
+                try Task.checkCancellation()
+                let episodesURL = try Self.makeURL(
+                    baseURL: baseURL,
+                    path: "/api/v2/search/episodes",
+                    queryItems: [
+                        URLQueryItem(name: "anime", value: variant),
+                        episodeQuery.isEmpty ? nil : URLQueryItem(name: "episode", value: episodeQuery)
+                    ].compactMap { $0 }
                 )
-                hadSuccessfulResponse = true
-                results.append(contentsOf: Self.parseBuiltinSearchResults(body, baseURL: baseURL))
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                lastError = error
+                do {
+                    let body = try await getDanmakuText(
+                        from: episodesURL.absoluteString,
+                        timeout: Self.searchRequestTimeout
+                    )
+                    hadSuccessfulResponse = true
+                    results.append(contentsOf: Self.parseBuiltinSearchResults(body, baseURL: baseURL))
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    lastError = error
+                }
+                if !results.isEmpty { break }
             }
             if !results.isEmpty { break }
         }
@@ -432,6 +445,12 @@ public final class DanmuService {
         appendEpisodes(object)
         if let bangumi = object["bangumi"] as? [String: Any] {
             appendEpisodes(bangumi, prefix: firstString(bangumi, keys: ["animeTitle", "title", "name"]))
+        }
+        if let data = object["data"] as? [String: Any] {
+            appendEpisodes(data, prefix: firstString(data, keys: ["animeTitle", "title", "name"]))
+            if let bangumi = data["bangumi"] as? [String: Any] {
+                appendEpisodes(bangumi, prefix: firstString(bangumi, keys: ["animeTitle", "title", "name"]))
+            }
         }
         for key in ["animes", "anime", "data"] {
             guard let items = object[key] as? [[String: Any]] else { continue }
@@ -902,8 +921,31 @@ public final class DanmuService {
     }
 
     private static func extractNumber(from value: String) -> Int {
-        let digits = value.compactMap { $0.isNumber ? String($0) : nil }.joined()
-        return Int(digits) ?? -1
+        extractEpisodeNumber(value)
+    }
+
+    /// Mirrors Android DanmuEpisodeMatcher.episodeNumber(): prefer the
+    /// episode portion of SxxExx/EPx labels instead of concatenating season
+    /// and episode digits (S01E02 must resolve to episode 2, not 102).
+    private static func extractEpisodeNumber(_ value: String) -> Int {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let patterns = [
+            #"(?i)S\s*\d+\s*E\s*0*(\d+)"#,
+            #"(?i)(?:EP|第)\s*0*(\d+)"#,
+            #"(?i)(?:^|[^A-Za-z])0*(\d+)\s*(?:集|话|期|回)?$"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: normalized, range: NSRange(normalized.startIndex..., in: normalized)),
+                  match.numberOfRanges > 1,
+                  let range = Range(match.range(at: 1), in: normalized),
+                  let number = Int(normalized[range]) else { continue }
+            return number
+        }
+        guard let regex = try? NSRegularExpression(pattern: #"\d+"#),
+              let match = regex.firstMatch(in: normalized, range: NSRange(normalized.startIndex..., in: normalized)),
+              let range = Range(match.range, in: normalized) else { return -1 }
+        return Int(normalized[range]) ?? -1
     }
 
     private static func jsonObject(_ body: String) -> [String: Any]? {
@@ -989,7 +1031,9 @@ private enum DanmuCueParser {
             var text = scalarString(item["m"])
             if text.isEmpty { text = scalarString(item["text"]) }
             guard !param.isEmpty, !text.isEmpty else { return nil }
-            return makeCue(param: param, text: text)
+            // The builtin API uses `time,type,color,source` while the
+            // Android parser expects `time,type,size,color`.
+            return makeCue(param: normalizeDanmakuParam(param), text: text)
         }
         return normalized(cues)
     }
@@ -1031,6 +1075,35 @@ private enum DanmuCueParser {
             color: color,
             text: decodeXML(text)
         )
+    }
+
+    private static func normalizeDanmakuParam(_ param: String) -> String {
+        let values = param.split(separator: ",", omittingEmptySubsequences: false).map {
+            String($0).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard values.count >= 4 else { return param }
+        let time = values[0]
+        let type = values[1]
+        let size = values[2]
+        let color = values[3]
+        if parseColor(color) == nil {
+            // A color-only feed normally contains a 24-bit numeric value in
+            // the third slot and a source label in the fourth slot. Small
+            // values (for example the normal font size 25) remain sizes.
+            let looksLikeColorOnly = size.hasPrefix("#")
+                || size.lowercased().hasPrefix("0x")
+                || (Int(size).map { $0 > 255 } ?? false)
+            if looksLikeColorOnly, parseColor(size) != nil {
+                return "\(time),\(type),25,\(normalizeColorValue(size))"
+            }
+            return "\(time),\(type),\(size),16777215"
+        }
+        return "\(time),\(type),\(size),\(normalizeColorValue(color))"
+    }
+
+    private static func normalizeColorValue(_ value: String) -> String {
+        guard let color = parseColor(value) else { return "16777215" }
+        return String(color)
     }
 
     private static func parseColor(_ value: String?) -> Int? {

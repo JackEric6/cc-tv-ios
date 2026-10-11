@@ -391,6 +391,7 @@ struct M3U8ManifestPurifier {
         if hasEndList(transformed) && transformed.contains("#EXT-X-DISCONTINUITY") {
             transformed = removeDecimalPrecisionGroups(transformed, removed: &removed)
             transformed = removeFrameRateGroups(transformed, removed: &removed)
+            transformed = removeUniformDurationGroups(transformed, removed: &removed)
         }
         transformed = removeSuspiciousDiscontinuityGroups(transformed, removed: &removed)
         transformed = normalizeDiscontinuities(transformed)
@@ -784,6 +785,72 @@ struct M3U8ManifestPurifier {
             else { output.append(contentsOf: groups[index]) }
         }
         return output.joined(separator: "\n")
+    }
+
+    /// Some VOD providers splice same-host ads without cue markers. Android's
+    /// purifier recognizes these as short discontinuity groups whose segment
+    /// durations are uniform but differ from the dominant cadence. Keep the
+    /// same conservative limits here: at least three repeated main groups,
+    /// at least two occurrences of the alternate cadence, and no more than
+    /// the normal ad segment budget.
+    private static func removeUniformDurationGroups(_ content: String, removed: inout Int) -> String {
+        let groups = buildGroups(normalize(content).components(separatedBy: "\n"))
+        guard groups.count >= 4 else { return content }
+
+        var cadenceByGroup: [String?] = Array(repeating: nil, count: groups.count)
+        var cadenceCounts: [String: Int] = [:]
+        for index in groups.indices.dropLast() {
+            guard let cadence = uniformGroupDuration(groups[index]) else { continue }
+            cadenceByGroup[index] = cadence
+            cadenceCounts[cadence, default: 0] += 1
+        }
+
+        guard let dominant = cadenceCounts.max(by: { $0.value < $1.value }),
+              dominant.value >= 3,
+              cadenceCounts.values.filter({ $0 == dominant.value }).count == 1,
+              let mainDuration = Decimal(string: dominant.key) else { return content }
+
+        var drop = Set<Int>()
+        var removable = 0
+        for index in groups.indices.dropLast() {
+            guard let cadence = cadenceByGroup[index], cadence != dominant.key,
+                  let count = cadenceCounts[cadence], count >= 2,
+                  Double(count) / Double(dominant.value) <= 0.35,
+                  let duration = Decimal(string: cadence),
+                  duration > Decimal(string: "1")!, duration <= Decimal(string: "10")!,
+                  absDecimal(duration - mainDuration) >= Decimal(string: "0.05")!,
+                  groups[index].filter({ parseDuration($0) != nil }).count >= 3 else { continue }
+            drop.insert(index)
+            removable += mediaCount(groups[index].joined(separator: "\n"))
+        }
+
+        let totalSegments = groups.reduce(0) { $0 + mediaCount($1.joined(separator: "\n")) }
+        let allDurations = groups.flatMap { $0.compactMap(parseDuration) }
+        guard !drop.isEmpty,
+              removable <= adSegmentLimit(for: allDurations),
+              Double(removable) <= Double(max(totalSegments, 1)) * 0.3 else { return content }
+
+        var output: [String] = []
+        for index in groups.indices {
+            if drop.contains(index) {
+                removed += mediaCount(groups[index].joined(separator: "\n"))
+            } else {
+                output.append(contentsOf: groups[index])
+            }
+        }
+        return normalizeDiscontinuities(output.joined(separator: "\n"))
+    }
+
+    private static func uniformGroupDuration(_ group: [String]) -> String? {
+        let durations = group.compactMap(parseDuration)
+        guard durations.count >= 3, durations.count <= 12,
+              let first = durations.first,
+              durations.allSatisfy({ $0.value == first.value }) else { return nil }
+        return NSDecimalNumber(decimal: Decimal(string: first.raw) ?? .zero).stringValue
+    }
+
+    private static func absDecimal(_ value: Decimal) -> Decimal {
+        value < .zero ? -value : value
     }
 
     private static func buildGroups(_ lines: [String]) -> [[String]] {
