@@ -138,6 +138,14 @@ jobs:
             -o /tmp/verify-danmaku-episode-matcher
           /tmp/verify-danmaku-episode-matcher
 
+      - name: Verify danmaku API fallback selection
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/DanmuAPISelectionPolicy.swift \
+            scripts/verify-danmu-api-selection.swift \
+            -o /tmp/verify-danmu-api-selection
+          /tmp/verify-danmu-api-selection
+
       - name: Verify danmaku timeline continuity
         run: |
           swiftc -parse-as-library \

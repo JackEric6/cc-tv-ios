@@ -34,7 +34,7 @@ struct VerifyPlaybackRequestHeaders {
             to: ["User-Agent": PlaybackRequestHeaderPolicy.androidDefaultUserAgent],
             sourceKey: "xgzy"
         )
-        precondition(xiguaHeaders["Referer"] == nil)
+        precondition(xiguaHeaders["Referer"] == "https://xgzy.tv/")
         precondition(xiguaHeaders["User-Agent"] == PlaybackRequestHeaderPolicy.androidCMSPlaybackUserAgent)
 
         let xiguaCatalogReferer = CMSRequestHeaderPolicy.sourceReferer(

@@ -2,6 +2,7 @@ import Foundation
 
 enum PlaybackRequestHeaderPolicy {
     private static let cmsSourceReferers: [String: String] = [
+        "xgzy": "https://xgzy.tv/",
         "ffzy": "https://ffzy5.tv/",
         "lzi": "https://lzizy.net/",
         "sony": "https://suonizy.net/",
