@@ -1129,7 +1129,7 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
     /// 位置和尺寸上——这正是"缩到左上角"的那一块。这里按父视图当前 bounds
     /// 复位。只在转场结束后调用，转场期间调用会打断动画。
     private func resetRenderLayerFrame() {
-        guard let renderView = playerLayer?.player.view? else { return }
+        guard let renderView = playerLayer?.player.view else { return }
         if renderView.transform != .identity {
             renderView.transform = .identity
         }
