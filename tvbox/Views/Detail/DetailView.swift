@@ -499,7 +499,11 @@ struct DetailView: View {
               let source = apiConfig.getSource(key: sourceKey) else {
             return ""
         }
-        return source.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let configuredName = source.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if SearchSourceGroup.classify(sourceKey: sourceKey, sourceName: configuredName) == .tiantang {
+            return "天堂"
+        }
+        return configuredName
     }
 
     private var displayPoster: String {
