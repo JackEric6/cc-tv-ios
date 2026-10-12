@@ -55,8 +55,10 @@ class PlayerTransitionAnimator: NSObject, UIViewControllerAnimatedTransitioning 
             return
         }
         if isDismiss {
-            containerView.layoutIfNeeded()
-            presentedView.bounds = containerView.bounds
+            // Keep the full-screen render geometry intact until the reverse
+            // transition starts. Resizing this controller to the inline
+            // container here causes a visible preliminary shrink before the
+            // animator runs the actual entry animation in reverse.
             presentedView.removeFromSuperview()
         } else {
             if let viewController = transitionContext.viewController(forKey: .to) {

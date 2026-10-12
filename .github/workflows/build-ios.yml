@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - "tvbox/**"
+      - "Vendor/**"
       - "scripts/**"
       - "project.yml"
       - ".github/workflows/build-ios.yml"
