@@ -7,15 +7,21 @@ enum JianpianSourceService {
         case discovered(String)
     }
 
-    static func search(keyword: String, preferredOrigin: String = JianpianOriginPolicy.preferredOrigin) async throws -> [Movie.Video] {
+    static func search(
+        keyword: String,
+        preferredOrigin: String = JianpianOriginPolicy.preferredOrigin,
+        categoryID: String = "88",
+        page: Int = 1,
+        pageSize: Int = 20
+    ) async throws -> [Movie.Video] {
         let response = try await request(
             path: "/api/v2/search/videoV2",
             preferredOrigin: preferredOrigin,
             query: [
                 URLQueryItem(name: "key", value: keyword),
-                URLQueryItem(name: "category_id", value: "88"),
-                URLQueryItem(name: "page", value: "1"),
-                URLQueryItem(name: "pageSize", value: "20")
+                URLQueryItem(name: "category_id", value: categoryID),
+                URLQueryItem(name: "page", value: String(max(1, page))),
+                URLQueryItem(name: "pageSize", value: String(min(max(1, pageSize), 50)))
             ]
         )
         let rows = array(in: response, keys: ["data", "items", "list"])
@@ -24,6 +30,25 @@ enum JianpianSourceService {
             let video = mapVideo(item)
             return video.id.isEmpty ? nil : video
         }
+    }
+
+    static func category(
+        sortID: String,
+        page: Int = 1,
+        preferredOrigin: String = JianpianOriginPolicy.preferredOrigin
+    ) async throws -> [Movie.Video] {
+        guard JianpianHomeCatalog.sorts.contains(where: { $0.id == sortID }) else {
+            return []
+        }
+        // 荐片没有公开的分类浏览接口；videoV2 搜索接口支持 category_id，
+        // 用“热播”作为分类浏览词取得对应类型的可播放条目。
+        return try await search(
+            keyword: "热播",
+            preferredOrigin: preferredOrigin,
+            categoryID: sortID,
+            page: page,
+            pageSize: 20
+        )
     }
 
     static func detail(

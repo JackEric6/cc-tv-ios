@@ -55,6 +55,15 @@ jobs:
             -o /tmp/verify-jianpian-origin
           /tmp/verify-jianpian-origin
 
+      - name: Verify Jianpian home category order
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/MovieSort.swift \
+            tvbox/Models/JianpianHomeCatalog.swift \
+            scripts/verify-jianpian-home.swift \
+            -o /tmp/verify-jianpian-home
+          /tmp/verify-jianpian-home
+
       - name: Verify bundled default config migration
         run: |
           swiftc -parse-as-library \

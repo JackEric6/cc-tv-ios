@@ -127,11 +127,9 @@ class HomeViewModel: ObservableObject {
                     categoryVideos = []
                     currentPage = 1
                     hasMore = true
-                    if !isJianpianSource(source) {
-                        Task { @MainActor [weak self] in
-                            guard let self else { return }
-                            await self.loadCategoryVideos(page: 1, sort: firstSort)
-                        }
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        await self.loadCategoryVideos(page: 1, sort: firstSort)
                     }
                 } else if selectedSort == nil {
                     selectedSort = effectiveSorts.first
@@ -142,7 +140,7 @@ class HomeViewModel: ObservableObject {
                 categoryVideos = []
                 currentPage = 1
                 hasMore = true
-                if let firstSort = selectedSort, !isJianpianSource(source) {
+                if let firstSort = selectedSort {
                     Task { @MainActor [weak self] in
                         guard let self else { return }
                         await self.loadCategoryVideos(page: 1, sort: firstSort)
@@ -171,21 +169,13 @@ class HomeViewModel: ObservableObject {
             }
             if categoryVideos.isEmpty,
                let selectedSort,
-               selectedSort.id != "home",
-               !isJianpianSource(source) {
+               selectedSort.id != "home" {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     await self.loadCategoryVideos(page: 1, sort: selectedSort)
                 }
             }
             didCompleteInitialSortLoad = true
-
-            if isJianpianSource(source) {
-                // The Android Jianpian home response is a valid class-only JSON document.
-                // Do not retry indefinitely: its public API has no category-list endpoint.
-                didLoadInitialContent = true
-                cancelInitialLoadRetry()
-            }
 
             let sourceKey = source.key
             recommendationTask?.cancel()
@@ -808,6 +798,12 @@ class HomeViewModel: ObservableObject {
 
         if isGuazi {
             return GuaziHomeCategoryOrder.sort(filtered)
+        }
+        if isJianpianSource(source) {
+            let order = Dictionary(uniqueKeysWithValues: JianpianHomeCatalog.sorts.enumerated().map {
+                ($0.element.id, $0.offset)
+            })
+            return filtered.sorted { (order[$0.id] ?? Int.max) < (order[$1.id] ?? Int.max) }
         }
 
         // 显式携带源序号，保证相同优先级的分类严格保持源返回顺序。

@@ -226,8 +226,11 @@ class SourceService {
             )
         }
         if SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name) == .jianpian {
-            // Android's Jianpian adapter exposes categories but no category-list API.
-            return []
+            return try await JianpianSourceService.category(
+                sortID: sortData.id,
+                page: page,
+                preferredOrigin: sourceBean.api
+            )
         }
         let api = sourceBean.api
         guard !api.isEmpty else { throw SourceError.emptyApi }
