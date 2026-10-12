@@ -26,18 +26,16 @@ let package = Package(
 //                .product(name: "Libmpv", package: "FFmpegKit"),
                 "DisplayCriteria",
             ],
+            path: "Sources/KSPlayer",
             resources: [.process("Metal/Shaders.metal")],
             swiftSettings: [
                 .enableExperimentalFeature("StrictConcurrency"),
             ]
         ),
         .target(
-            name: "DisplayCriteria"
-        ),
-        .testTarget(
-            name: "KSPlayerTests",
-            dependencies: ["KSPlayer"],
-            resources: [.process("Resources")]
+            name: "DisplayCriteria",
+            path: "Sources/DisplayCriteria",
+            publicHeadersPath: "include"
         ),
     ]
 )
