@@ -1120,11 +1120,6 @@ class ApiConfig: ObservableObject {
         UserDefaults.standard.set(source.key, forKey: HawkConfig.HOME_API)
     }
 
-    /// Secret settings codes switch the current session only; the next launch returns to Guazi.
-    func setTemporaryHomeSource(_ source: SourceBean) {
-        self.homeSourceBean = source
-    }
-
     @discardableResult
     func unlockGuaziSource() -> Bool {
         isGuaziUnlocked = true

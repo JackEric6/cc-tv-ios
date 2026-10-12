@@ -375,6 +375,13 @@ public final class DanmuService {
         query: String,
         episode: String
     ) async throws -> [DanmuSearchResult] {
+        let matchedResults = await searchBuiltinMatches(
+            baseURL: baseURL,
+            title: query,
+            episode: episode
+        )
+        if !matchedResults.isEmpty { return matchedResults }
+
         let episodeNumber = Self.extractEpisodeNumber(episode)
         let episodeQueries = episodeNumber > 0 ? [String(episodeNumber), ""] : [""]
         let requests = episodeQueries.flatMap { episodeQuery in
@@ -532,6 +539,24 @@ public final class DanmuService {
         title: String,
         episode: String
     ) async throws -> [DanmuCue] {
+        let matchedResults = await searchBuiltinMatches(
+            baseURL: baseURL,
+            title: title,
+            episode: episode
+        )
+        let episodeMatches = matchedResults.filter {
+            DanmakuEpisodeMatcher.matches(requestedEpisode: episode, title: $0.name)
+        }
+        let prioritizedMatches = episodeMatches.isEmpty && matchedResults.count == 1
+            ? matchedResults
+            : episodeMatches
+        let matchedCues = await loadFirstAvailable(
+            Array(prioritizedMatches.prefix(4)),
+            title: title,
+            episode: episode
+        )
+        if !matchedCues.isEmpty { return matchedCues }
+
         let number = Self.extractNumber(from: episode)
         let queries = number > 0 ? [String(number), ""] : [""]
         let titleVariants = Self.searchTitleVariants(title)
@@ -591,6 +616,40 @@ public final class DanmuService {
         }
     }
 
+    private func searchBuiltinMatches(
+        baseURL: String,
+        title: String,
+        episode: String
+    ) async -> [DanmuSearchResult] {
+        let fileName = DanmuMatchRequestPolicy.fileName(
+            title: Self.searchTitleVariants(title).first ?? title,
+            episode: episode
+        )
+        guard let matchURL = try? Self.makeURL(
+            baseURL: baseURL,
+            path: "/api/v2/match",
+            queryItems: []
+        ), let requestBody = DanmuMatchRequestPolicy.requestBody(fileName: fileName),
+           let body = try? await getDanmakuText(
+            from: matchURL.absoluteString,
+            timeout: Self.searchRequestTimeout,
+            method: "POST",
+            body: requestBody,
+            contentType: "application/json"
+           ) else {
+            return []
+        }
+
+        return DanmuMatchRequestPolicy.parseMatches(body).compactMap { match in
+            guard let commentURL = DanmuMatchRequestPolicy.commentURL(
+                baseURL: baseURL,
+                videoURL: match.videoURL
+            ) else { return nil }
+            let name = match.displayTitle.isEmpty ? fileName : match.displayTitle
+            return DanmuSearchResult(name: name, url: commentURL, isBuiltin: true)
+        }
+    }
+
     private func loadComments(baseURL: String, match: EpisodeMatch) async throws -> [DanmuCue] {
         // Some deployments reject the optional format query with 404 while
         // returning the same JSON from the canonical path. Keep both forms,
@@ -617,7 +676,8 @@ public final class DanmuService {
         from urlString: String,
         timeout: Int,
         method: String = "GET",
-        body: Data? = nil
+        body: Data? = nil,
+        contentType: String = "application/x-www-form-urlencoded; charset=utf-8"
     ) async throws -> String {
         guard let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             throw NetworkError.invalidURL(urlString)
@@ -632,7 +692,7 @@ public final class DanmuService {
         request.setValue("application/json,text/plain,*/*", forHTTPHeaderField: "Accept")
         request.setValue("zh-CN,zh;q=0.9,en;q=0.7", forHTTPHeaderField: "Accept-Language")
         if body != nil {
-            request.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
+            request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         }
         var lastError: Error?
         for attempt in 0...Self.requestRetryCount {

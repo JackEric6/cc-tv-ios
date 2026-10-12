@@ -165,6 +165,22 @@ jobs:
             -o /tmp/verify-danmu-api-selection
           /tmp/verify-danmu-api-selection
 
+      - name: Verify built-in danmaku match API
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/DanmuMatchRequestPolicy.swift \
+            scripts/verify-danmu-match-api.swift \
+            -o /tmp/verify-danmu-match-api
+          /tmp/verify-danmu-match-api
+
+      - name: Verify persistent home source settings codes
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/HomeSourceSelectionPolicy.swift \
+            scripts/verify-home-source-selection.swift \
+            -o /tmp/verify-home-source-selection
+          /tmp/verify-home-source-selection
+
       - name: Verify danmaku timeline continuity
         run: |
           swiftc -parse-as-library \

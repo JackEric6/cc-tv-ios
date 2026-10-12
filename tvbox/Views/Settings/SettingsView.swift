@@ -440,13 +440,8 @@ private struct FeedbackSuggestionView: View {
     private func saveFeedback() {
         guard !trimmedFeedback.isEmpty else { return }
 
-        if trimmedFeedback == "8801" {
-            setHomeSource(key: "xgzy", title: "西瓜")
-            return
-        }
-
-        if trimmedFeedback == "9901" {
-            setHomeSource(key: "jianpian", title: "荐片")
+        if let selection = HomeSourceSelectionPolicy.selection(forSettingsCode: trimmedFeedback) {
+            setHomeSource(key: selection.key, title: selection.title)
             return
         }
 
@@ -465,7 +460,7 @@ private struct FeedbackSuggestionView: View {
             submissionMessage = "当前配置中没有可用的\(title)源"
             return
         }
-        appState.apiConfig.setTemporaryHomeSource(source)
+        appState.apiConfig.setHomeSource(source)
         appState.applyLoadedConfigState(refreshHome: true)
         feedback = ""
         submissionMessage = "已切换为\(title)首页"
