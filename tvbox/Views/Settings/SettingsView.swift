@@ -70,8 +70,7 @@ struct SettingsView: View {
                             icon: "wand.and.stars",
                             title: "M3U8 净化",
                             value: viewModel.m3u8Purify ? "开启" : "关闭",
-                            iconColor: .yellow,
-                            highlighted: true
+                            iconColor: .orange
                         ) {
                             showingPicker = .m3u8Purify
                         }
@@ -80,8 +79,7 @@ struct SettingsView: View {
                             icon: "network",
                             title: "使用系统代理",
                             value: viewModel.useSystemProxy ? "开启" : "关闭",
-                            iconColor: .yellow,
-                            highlighted: true
+                            iconColor: .orange
                         ) {
                             showingPicker = .systemProxy
                         }
@@ -467,7 +465,7 @@ private struct FeedbackSuggestionView: View {
             submissionMessage = "当前配置中没有可用的\(title)源"
             return
         }
-        appState.apiConfig.setHomeSource(source)
+        appState.apiConfig.setTemporaryHomeSource(source)
         appState.applyLoadedConfigState(refreshHome: true)
         feedback = ""
         submissionMessage = "已切换为\(title)首页"

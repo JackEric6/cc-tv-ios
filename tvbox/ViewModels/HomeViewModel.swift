@@ -127,9 +127,11 @@ class HomeViewModel: ObservableObject {
                     categoryVideos = []
                     currentPage = 1
                     hasMore = true
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        await self.loadCategoryVideos(page: 1, sort: firstSort)
+                    if !isJianpianSource(source) {
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            await self.loadCategoryVideos(page: 1, sort: firstSort)
+                        }
                     }
                 } else if selectedSort == nil {
                     selectedSort = effectiveSorts.first
@@ -140,7 +142,7 @@ class HomeViewModel: ObservableObject {
                 categoryVideos = []
                 currentPage = 1
                 hasMore = true
-                if let firstSort = selectedSort {
+                if let firstSort = selectedSort, !isJianpianSource(source) {
                     Task { @MainActor [weak self] in
                         guard let self else { return }
                         await self.loadCategoryVideos(page: 1, sort: firstSort)
@@ -169,13 +171,21 @@ class HomeViewModel: ObservableObject {
             }
             if categoryVideos.isEmpty,
                let selectedSort,
-               selectedSort.id != "home" {
+               selectedSort.id != "home",
+               !isJianpianSource(source) {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     await self.loadCategoryVideos(page: 1, sort: selectedSort)
                 }
             }
             didCompleteInitialSortLoad = true
+
+            if isJianpianSource(source) {
+                // The Android Jianpian home response is a valid class-only JSON document.
+                // Do not retry indefinitely: its public API has no category-list endpoint.
+                didLoadInitialContent = true
+                cancelInitialLoadRetry()
+            }
 
             let sourceKey = source.key
             recommendationTask?.cancel()
@@ -317,6 +327,10 @@ class HomeViewModel: ObservableObject {
 
     private func isGuaziSource(_ source: SourceBean) -> Bool {
         source.key.caseInsensitiveCompare("guazi") == .orderedSame
+    }
+
+    private func isJianpianSource(_ source: SourceBean) -> Bool {
+        SearchSourceGroup.classify(sourceKey: source.key, sourceName: source.name) == .jianpian
     }
 
     private func scheduleInitialLoadRetry() {
@@ -787,7 +801,7 @@ class HomeViewModel: ObservableObject {
             }
             // 瓜子适配器的首页分类本身就是可请求的一级分类，不能按西瓜的
             // 父分类规则把“电影/电视剧/动漫/综艺”全部删掉。
-            if !isGuazi && obviousParentCategoryNames.contains(name) { return false }
+            if !isGuazi && !isJianpianSource(source) && obviousParentCategoryNames.contains(name) { return false }
             let dedupKey = "\(id)|\(name)"
             return seen.insert(dedupKey).inserted
         }

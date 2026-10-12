@@ -31,6 +31,9 @@ struct VerifyCz4kSearch {
         precondition(results[1].name == "抓特务 特别篇")
         precondition(results[2].id == "/detail/root-domain.html")
         precondition(results[3].id == "/detail/from-data.html")
-        print("CZ4K SEARCH PARSER CHECKS PASSED")
+        precondition(Cz4kSearchParser.isPlayableURL(URL(string: "https://www.cz4k.com/p/7580-1-1.html")!))
+        precondition(Cz4kSearchParser.isPlayableURL(URL(string: "https://www.cz4k.com/v_play/7580-1-1.html")!))
+        precondition(!Cz4kSearchParser.isPlayableURL(URL(string: "https://www.cz4k.com/movie/7580.html")!))
+        print("CZ4K SEARCH AND PLAYBACK ROUTE CHECKS PASSED")
     }
 }

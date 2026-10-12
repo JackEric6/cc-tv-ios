@@ -22,6 +22,10 @@ class SourceService {
             // 瓜子没有标准 CMS 分类接口，首页分类走专用加密接口。
             return (sorts: await GuaziService.shared.homeSorts(), homeVideos: [])
         }
+        if SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name) == .jianpian {
+            // 荐片不是 CMS JSON 接口；和安卓版一样使用本地分类 JSON，不请求 ?ac=class。
+            return (sorts: JianpianHomeCatalog.sorts, homeVideos: [])
+        }
         let api = sourceBean.api
         guard !api.isEmpty else {
             throw SourceError.emptyApi
@@ -220,6 +224,10 @@ class SourceService {
                 page: page,
                 filters: filters
             )
+        }
+        if SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name) == .jianpian {
+            // Android's Jianpian adapter exposes categories but no category-list API.
+            return []
         }
         let api = sourceBean.api
         guard !api.isEmpty else { throw SourceError.emptyApi }

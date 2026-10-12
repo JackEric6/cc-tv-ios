@@ -59,7 +59,7 @@ enum PlaybackRequestHeaderPolicy {
     static let androidCMSPlaybackUserAgent =
         "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
     static let cz4kBrowserUserAgent =
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+        "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
     static let cz4kReferer = "https://www.cz4k.com/"
 
     static func appliesToCMSPlayback(sourceType: Int) -> Bool {

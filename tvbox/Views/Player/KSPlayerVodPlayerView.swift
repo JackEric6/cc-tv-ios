@@ -1501,7 +1501,6 @@ private struct KSPlayerUIView: UIViewRepresentable {
         view.toolBar.playbackRateButton.setTitle(nil, for: .normal)
         view.toolBar.playbackRateButton.setImage(UIImage(systemName: "speedometer"), for: .normal)
         view.toolBar.playbackRateButton.tintColor = .white
-        view.toolBar.playbackRateButton.widthAnchor.constraint(equalToConstant: 26).isActive = true
         view.toolBar.playbackRateButton.accessibilityLabel = "倍速"
         // Keep the persisted selection visible even before the first ready
         // callback rebuilds KSPlayer's native controls.
@@ -2215,9 +2214,14 @@ private struct KSPlayerUIView: UIViewRepresentable {
             }
             // Keep small gaps between controls while leaving the time label as
             // the only flexible item in the narrow inline toolbar.
+            toolbar.axis = .horizontal
+            toolbar.alignment = .center
+            toolbar.distribution = .fill
             toolbar.spacing = 4
+            toolbar.setCustomSpacing(10, after: toolbar.playbackRateButton)
             toolbar.timeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             toolbar.timeLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            ensureWidthConstraint(toolbar.playbackRateButton, constant: 28, relation: .equal)
             toolbar.playbackRateButton.setContentCompressionResistancePriority(.required, for: .horizontal)
             episodeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
             danmakuButton.setContentCompressionResistancePriority(.required, for: .horizontal)

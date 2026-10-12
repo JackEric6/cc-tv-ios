@@ -60,6 +60,21 @@ enum Cz4kSearchParser {
         return videos
     }
 
+    static func isPlayableURL(_ url: URL) -> Bool {
+        let path = url.path.lowercased()
+        if path.contains("/p/") || path.contains("/play") || path.contains("/vodplay")
+            || path.contains("/vod-play") || path.contains("/playmov")
+            || path.contains("/player") || path.contains("/v_play/")
+            || path.contains("/watch") || path.contains("/episode")
+            || path.contains("/video/") || path.hasSuffix(".m3u8")
+            || path.hasSuffix(".mp4") {
+            return true
+        }
+        return (URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []).contains { item in
+            ["url", "play", "playurl", "video", "vid"].contains(item.name.lowercased())
+        }
+    }
+
     private static func isDetailURL(_ url: URL) -> Bool {
         let path = url.path.lowercased()
         let excluded = ["/nimasile", "/search", "/vodsearch", "/play", "/vodplay", "/vod-play", "/playmov", "/player", "/type", "/topic", "/actor", "/tag"]

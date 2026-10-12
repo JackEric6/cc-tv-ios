@@ -712,7 +712,11 @@ class ApiConfig: ObservableObject {
 
             if !self.sourceBeanList.isEmpty {
                 // 保留已选择的首页源；没有有效选择时按瓜子、西瓜、荐片顺序初始化。
-                let savedHomeKey = UserDefaults.standard.string(forKey: HawkConfig.HOME_API)
+                let storedHomeKey = UserDefaults.standard.string(forKey: HawkConfig.HOME_API)
+                let savedHomeKey = HomeSourceSelectionPolicy.startupKey(savedKey: storedHomeKey)
+                if savedHomeKey != storedHomeKey, let savedHomeKey {
+                    UserDefaults.standard.set(savedHomeKey, forKey: HawkConfig.HOME_API)
+                }
                 let selectedKey = self.homeSourceBean?.key ?? savedHomeKey
                 if let selectedKey,
                    let selectedSource = self.sourceBeanList.first(where: {
@@ -1114,6 +1118,11 @@ class ApiConfig: ObservableObject {
     func setHomeSource(_ source: SourceBean) {
         self.homeSourceBean = source
         UserDefaults.standard.set(source.key, forKey: HawkConfig.HOME_API)
+    }
+
+    /// Secret settings codes switch the current session only; the next launch returns to Guazi.
+    func setTemporaryHomeSource(_ source: SourceBean) {
+        self.homeSourceBean = source
     }
 
     @discardableResult

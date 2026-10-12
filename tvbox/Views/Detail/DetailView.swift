@@ -973,9 +973,12 @@ struct DetailView: View {
         guard position.isFinite, position > 0 else { return }
         UserDefaults.standard.set(position, forKey: "congcong.playback.outro.\(playbackMarkerKey)")
         markerRevision += 1
-        // 标记动作发生在片尾起点，不应立刻触发自动切集。
-        didSkipOutroForEpisode = true
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        if canPlayNextEpisode {
+            playNextEpisodeIfNeeded(sessionToken: playbackSessionToken)
+        } else {
+            didSkipOutroForEpisode = true
+        }
     }
 
     private func resetIntro() {

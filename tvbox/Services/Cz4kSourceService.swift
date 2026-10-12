@@ -23,30 +23,103 @@ enum Cz4kSourceService {
             return nil
         }
 
-        let html = try await Cz4kBrowserSession.loadHTML(pageURL, headers: configuredHeaders ?? [:])
-        guard let extracted = KktvsResponseNormalizer.extractMediaURL(
-            from: html,
-            baseURL: pageURL.absoluteString
-        ),
-              let mediaURL = SourceService.validPlayableURL(extracted),
-              mediaURL != pageURL.absoluteString else {
-            throw SourceError.invalidPlayableURL(rawURL)
+        var currentURL = pageURL
+        var visited = Set<String>()
+        var pageReferer: String?
+        for hop in 0..<4 {
+            guard visited.insert(currentURL.absoluteString).inserted else { break }
+            let page = try await Cz4kBrowserSession.loadPage(
+                currentURL,
+                headers: isCz4kHost(currentURL.host) ? (configuredHeaders ?? [:]) : [:],
+                referer: pageReferer,
+                waitForMedia: true
+            )
+            if page.isHLSPlaylist {
+                let requestHeaders = playbackHeaders(
+                    for: currentURL.absoluteString,
+                    referer: currentURL.absoluteString,
+                    configuredHeaders: configuredHeaders,
+                    cookie: page.cookieHeader(for: currentURL.absoluteString)
+                )
+                return ResolvedPlaybackMedia(url: currentURL.absoluteString, headers: requestHeaders)
+            }
+            let candidates = page.mediaURLs + [
+                KktvsResponseNormalizer.extractMediaURL(
+                    from: page.html,
+                    baseURL: currentURL.absoluteString
+                )
+            ].compactMap { $0 }
+            let directCandidates = candidates
+                .filter { KktvsResponseNormalizer.directMediaURL($0) != nil }
+                .sorted { mediaCandidatePriority($0) < mediaCandidatePriority($1) }
+            let extracted = directCandidates.first ?? candidates.first
+            guard let extracted,
+                  let mediaURL = SourceService.validPlayableURL(extracted),
+                  let mediaComponents = URLComponents(string: mediaURL),
+                  ["http", "https"].contains(mediaComponents.scheme?.lowercased() ?? "") else {
+                throw SourceError.invalidPlayableURL(currentURL.absoluteString)
+            }
+
+            if KktvsResponseNormalizer.directMediaURL(mediaURL) != nil {
+                let requestHeaders = playbackHeaders(
+                    for: mediaURL,
+                    referer: currentURL.absoluteString,
+                    configuredHeaders: configuredHeaders,
+                    cookie: page.cookieHeader(for: mediaURL)
+                )
+                return ResolvedPlaybackMedia(url: mediaURL, headers: requestHeaders)
+            }
+
+            guard mediaURL != currentURL.absoluteString,
+                  hop < 3,
+                  let nextURL = URL(string: mediaURL) else { break }
+            pageReferer = currentURL.absoluteString
+            currentURL = nextURL
         }
-        var requestHeaders = headers
-        configuredHeaders?.forEach { key, value in
-            requestHeaders.keys
-                .filter { $0.caseInsensitiveCompare(key) == .orderedSame }
-                .forEach { requestHeaders.removeValue(forKey: $0) }
-            requestHeaders[key] = value
-        }
-        requestHeaders = PlaybackRequestHeaderPolicy.applyingRefererOverride(
-            pageURL.absoluteString,
-            to: requestHeaders
-        )
-        return ResolvedPlaybackMedia(url: mediaURL, headers: requestHeaders)
+        throw SourceError.invalidPlayableURL(rawURL)
         #else
         return nil
         #endif
+    }
+
+    private static func isCz4kHost(_ value: String?) -> Bool {
+        guard let host = value?.lowercased() else { return false }
+        return host == "cz4k.com" || host.hasSuffix(".cz4k.com")
+    }
+
+    private static func playbackHeaders(
+        for mediaURL: String,
+        referer: String,
+        configuredHeaders: [String: String]?,
+        cookie: String?
+    ) -> [String: String] {
+        var result = headers
+        if let mediaHost = URLComponents(string: mediaURL)?.host, isCz4kHost(mediaHost) {
+            configuredHeaders?.forEach { key, value in
+                result.keys
+                    .filter { $0.caseInsensitiveCompare(key) == .orderedSame }
+                    .forEach { result.removeValue(forKey: $0) }
+                result[key] = value
+            }
+        }
+        result = PlaybackRequestHeaderPolicy.applyingRefererOverride(referer, to: result)
+        if let cookie, !cookie.isEmpty {
+            result.keys
+                .filter { $0.caseInsensitiveCompare("Cookie") == .orderedSame }
+                .forEach { result.removeValue(forKey: $0) }
+            result["Cookie"] = cookie
+        }
+        return result
+    }
+
+    private static func mediaCandidatePriority(_ value: String) -> Int {
+        let normalized = KktvsResponseNormalizer.normalizeMediaURL(value).lowercased()
+        if normalized.contains(".m3u8") || normalized.contains(".m3u?") { return 0 }
+        if normalized.contains(".mpd") { return 1 }
+        if normalized.contains(".mp4") || normalized.contains(".m4v") { return 2 }
+        if normalized.contains(".flv") || normalized.contains(".mkv") { return 3 }
+        if normalized.contains(".ts") || normalized.contains(".m4s") { return 5 }
+        return 4
     }
     static func search(keyword: String) async throws -> [Movie.Video] {
         var components = URLComponents(string: origin + "/nimasile")
@@ -97,7 +170,8 @@ enum Cz4kSourceService {
             )
             guard !href.isEmpty,
                   let episodeURL = resolvedURL(href, relativeTo: url),
-                  isPlayableURL(episodeURL), seen.insert(episodeURL.absoluteString).inserted else { continue }
+                  Cz4kSearchParser.isPlayableURL(episodeURL),
+                  seen.insert(episodeURL.absoluteString).inserted else { continue }
             let name = firstNonEmpty(attribute("title", in: attrs), text(body), "第\(episodes.count + 1)集")
             episodes.append(VodInfo.Episode(name: name, url: episodeURL.absoluteString))
             if episodes.count >= 200 { break }
@@ -123,20 +197,6 @@ enum Cz4kSourceService {
 
     private static func resolvedURL(_ value: String, relativeTo base: URL) -> URL? {
         URL(string: value.trimmingCharacters(in: .whitespacesAndNewlines), relativeTo: base)?.absoluteURL
-    }
-
-    private static func isPlayableURL(_ url: URL) -> Bool {
-        let path = url.path.lowercased()
-        if path.contains("/play") || path.contains("/vodplay") || path.contains("/vod-play")
-            || path.contains("/playmov") || path.contains("/player")
-            || path.contains("/v_play/") || path.contains("/watch")
-            || path.contains("/episode") || path.contains("/video/")
-            || path.hasSuffix(".m3u8") || path.hasSuffix(".mp4") {
-            return true
-        }
-        return (URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []).contains { item in
-            ["url", "play", "playurl", "video", "vid"].contains(item.name.lowercased())
-        }
     }
 
     private static func attribute(_ name: String, in value: String) -> String? {
@@ -190,29 +250,70 @@ enum Cz4kSourceService {
 }
 
 #if os(iOS)
+private struct Cz4kBrowserPage: Sendable {
+    let html: String
+    let mediaURLs: [String]
+    let mediaCookies: [String: String]
+    let isHLSPlaylist: Bool
+
+    func cookieHeader(for mediaURL: String) -> String? {
+        let normalizedMediaURL = KktvsResponseNormalizer.normalizeMediaURL(mediaURL)
+        if let exact = mediaCookies[normalizedMediaURL] { return exact }
+        guard let target = URL(string: mediaURL), let host = target.host?.lowercased() else { return nil }
+        return mediaCookies.first { key, _ in
+            guard let candidate = URL(string: key), let candidateHost = candidate.host?.lowercased() else {
+                return false
+            }
+            return candidateHost == host && candidate.path == target.path
+        }?.value
+    }
+}
+
 @MainActor
 private final class Cz4kBrowserSession: NSObject, WKNavigationDelegate {
     private static let userAgent = PlaybackRequestHeaderPolicy.cz4kBrowserUserAgent
     private static let timeout: TimeInterval = 60
+    private static let mediaWaitTimeout: TimeInterval = 24
 
     private let requestURL: URL
     private let requestHeaders: [String: String]
+    private let referer: String?
+    private let waitForMedia: Bool
     private let webView: WKWebView
     private let hostView: UIView
-    private var continuation: CheckedContinuation<String, Error>?
+    private var continuation: CheckedContinuation<Cz4kBrowserPage, Error>?
     private var timeoutTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
     private var finished = false
+    private let startedAt = Date()
 
-    private init(url: URL, headers: [String: String], webView: WKWebView, hostView: UIView) {
+    private init(
+        url: URL,
+        headers: [String: String],
+        referer: String?,
+        waitForMedia: Bool,
+        webView: WKWebView,
+        hostView: UIView
+    ) {
         requestURL = url
         requestHeaders = headers
+        self.referer = referer
+        self.waitForMedia = waitForMedia
         self.webView = webView
         self.hostView = hostView
     }
 
     static func loadHTML(_ url: URL, headers: [String: String] = [:]) async throws -> String {
-        guard let host = url.host?.lowercased(), host == "cz4k.com" || host.hasSuffix(".cz4k.com") else {
+        (try await loadPage(url, headers: headers, waitForMedia: false)).html
+    }
+
+    static func loadPage(
+        _ url: URL,
+        headers: [String: String] = [:],
+        referer: String? = nil,
+        waitForMedia: Bool
+    ) async throws -> Cz4kBrowserPage {
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else {
             throw SourceError.invalidApiUrl(url.absoluteString)
         }
         guard let window = UIApplication.shared.connectedScenes
@@ -225,6 +326,8 @@ private final class Cz4kBrowserSession: NSObject, WKNavigationDelegate {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        configuration.allowsInlineMediaPlayback = true
+        configuration.mediaTypesRequiringUserActionForPlayback = []
         let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 1, height: 1), configuration: configuration)
         webView.customUserAgent = userAgent
         webView.isOpaque = false
@@ -240,6 +343,8 @@ private final class Cz4kBrowserSession: NSObject, WKNavigationDelegate {
         let session = Cz4kBrowserSession(
             url: url,
             headers: headers,
+            referer: referer,
+            waitForMedia: waitForMedia,
             webView: webView,
             hostView: hostView
         )
@@ -247,7 +352,7 @@ private final class Cz4kBrowserSession: NSObject, WKNavigationDelegate {
         return try await session.load()
     }
 
-    private func load() async throws -> String {
+    private func load() async throws -> Cz4kBrowserPage {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 guard !Task.isCancelled else {
@@ -264,7 +369,10 @@ private final class Cz4kBrowserSession: NSObject, WKNavigationDelegate {
                 }
                 var request = URLRequest(url: requestURL, timeoutInterval: Self.timeout)
                 request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
-                request.setValue(PlaybackRequestHeaderPolicy.cz4kReferer, forHTTPHeaderField: "Referer")
+                request.setValue(
+                    referer ?? PlaybackRequestHeaderPolicy.cz4kReferer,
+                    forHTTPHeaderField: "Referer"
+                )
                 requestHeaders.forEach { request.setValue($1, forHTTPHeaderField: $0) }
                 webView.load(request)
             }
@@ -297,6 +405,22 @@ private final class Cz4kBrowserSession: NSObject, WKNavigationDelegate {
     }
 
     private func inspectPage() {
+        let autoplayScript = waitForMedia ? """
+          document.querySelectorAll('video').forEach(function(video) {
+            if (!video.__cz4kAutoplayAttempted) {
+              video.__cz4kAutoplayAttempted = true;
+              video.muted = true;
+              var result = video.play();
+              if (result && result.catch) result.catch(function() {});
+            }
+          });
+          try {
+            if (typeof window.jwplayer === 'function') {
+              var player = window.jwplayer();
+              if (player && player.play) player.play(true);
+            }
+          } catch (_) {}
+        """ : ""
         let script = """
         (function() {
           var title = document.title || '';
@@ -307,14 +431,22 @@ private final class Cz4kBrowserSession: NSObject, WKNavigationDelegate {
             if (value) mediaURLs.push(value);
           });
           performance.getEntriesByType('resource').forEach(function(entry) {
-            if (/\\.(m3u8|mp4|mpd|flv|mkv|webm|mov)(?:[?#]|$)/i.test(entry.name)) {
+            if (/\\.(m3u8|mp4|mpd|flv|mkv|webm|mov|ts|m4s)(?:[?#]|$)/i.test(entry.name)) {
               mediaURLs.push(entry.name);
             }
           });
+          document.querySelectorAll('iframe[src], embed[src]').forEach(function(node) {
+            if (node.src) mediaURLs.push(node.src);
+          });
+        \(autoplayScript)
           mediaURLs = Array.from(new Set(mediaURLs));
+          var playlistText = text.trim();
+          if (playlistText.charCodeAt(0) === 65279) playlistText = playlistText.slice(1);
+          var isHLSPlaylist = playlistText.indexOf('#EXTM3U') === 0;
+          if (isHLSPlaylist) mediaURLs.unshift(location.href);
           var challengeWidget = !!document.querySelector('cap-widget');
           var challengeText = /雷池|safeline|安全检查|访问验证|请稍候|正在验证|验证中|验证失败|checking your browser|verifying you are human|403 forbidden|access denied|人机验证/i.test(title + ' ' + text);
-          return JSON.stringify({html: document.documentElement ? document.documentElement.outerHTML : '', mediaURLs: mediaURLs, challenge: challengeWidget || challengeText, textLength: text.length});
+          return JSON.stringify({html: document.documentElement ? document.documentElement.outerHTML : '', mediaURLs: mediaURLs, challenge: challengeWidget || challengeText, textLength: text.length, isHLSPlaylist: isHLSPlaylist});
         })();
         """
         webView.evaluateJavaScript(script) { [weak self] value, error in
@@ -336,20 +468,75 @@ private final class Cz4kBrowserSession: NSObject, WKNavigationDelegate {
             let html = page["html"] as? String ?? ""
             let textLength = page["textLength"] as? Int ?? 0
             let mediaURLs = page["mediaURLs"] as? [String] ?? []
-            let mediaPayload = mediaURLs.compactMap { url -> String? in
-                guard let data = try? JSONSerialization.data(withJSONObject: ["url": url]),
-                      let json = String(data: data, encoding: .utf8) else { return nil }
-                return json
-            }.joined(separator: "\n")
-            guard !html.isEmpty, textLength > 0 || !mediaPayload.isEmpty else {
+            let isHLSPlaylist = page["isHLSPlaylist"] as? Bool ?? false
+            let pageHasTarget = !mediaURLs.isEmpty || KktvsResponseNormalizer.extractMediaURL(
+                from: html,
+                baseURL: self.webView.url?.absoluteString ?? self.requestURL.absoluteString
+            ) != nil
+            guard !html.isEmpty, textLength > 0 || pageHasTarget else {
                 self.scheduleInspection()
                 return
             }
-            self.finish(.success(html + "\n" + mediaPayload))
+            if self.waitForMedia && !pageHasTarget && Date().timeIntervalSince(self.startedAt) < Self.mediaWaitTimeout {
+                self.scheduleInspection()
+                return
+            }
+            self.collectMediaCookies(for: mediaURLs, html: html, isHLSPlaylist: isHLSPlaylist)
         }
     }
 
-    private func finish(_ result: Result<String, Error>) {
+    private func collectMediaCookies(for mediaURLs: [String], html: String, isHLSPlaylist: Bool) {
+        let pageURL = webView.url?.absoluteString ?? requestURL.absoluteString
+        var candidates = mediaURLs
+        if let extracted = KktvsResponseNormalizer.extractMediaURL(from: html, baseURL: pageURL) {
+            candidates.append(extracted)
+        }
+        let uniqueCandidates = Array(Set(candidates.compactMap { value -> String? in
+            let normalized = KktvsResponseNormalizer.normalizeMediaURL(value)
+            guard let url = URL(string: normalized),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  url.host != nil else { return nil }
+            return url.absoluteString
+        }))
+        webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
+            Task { @MainActor in
+                guard let self, !self.finished else { return }
+                var cookieHeaders: [String: String] = [:]
+                for candidate in uniqueCandidates {
+                    guard let url = URL(string: candidate) else { continue }
+                    let matching = cookies.filter { cookie in
+                        Self.cookie(cookie, matches: url)
+                    }
+                    guard !matching.isEmpty else { continue }
+                    cookieHeaders[candidate] = matching
+                        .map { "\($0.name)=\($0.value)" }
+                        .joined(separator: "; ")
+                }
+                self.finish(.success(Cz4kBrowserPage(
+                    html: html,
+                    mediaURLs: mediaURLs,
+                    mediaCookies: cookieHeaders,
+                    isHLSPlaylist: isHLSPlaylist
+                )))
+            }
+        }
+    }
+
+    private static func cookie(_ cookie: HTTPCookie, matches url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        let rawDomain = cookie.domain.lowercased()
+        let isDomainCookie = rawDomain.hasPrefix(".")
+        let domain = rawDomain.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        guard host == domain || (isDomainCookie && host.hasSuffix(".\(domain)")),
+              !cookie.isSecure || url.scheme?.lowercased() == "https",
+              cookie.expiresDate.map({ $0 > Date() }) ?? true else { return false }
+        let cookiePath = cookie.path.isEmpty ? "/" : cookie.path
+        let requestPath = url.path.isEmpty ? "/" : url.path
+        return requestPath == cookiePath
+            || requestPath.hasPrefix(cookiePath.hasSuffix("/") ? cookiePath : cookiePath + "/")
+    }
+
+    private func finish(_ result: Result<Cz4kBrowserPage, Error>) {
         guard !finished else { return }
         finished = true
         timeoutTask?.cancel()
