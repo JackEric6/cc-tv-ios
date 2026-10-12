@@ -223,10 +223,11 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
         // 这里提前写入，确保 UIKit 在 present 的那一帧就允许横屏，避免
         // 被应用默认的 portrait 掩码卡住。
         KSOptions.supportedInterfaceOrientations = isFullScreen ? .landscapeRight : .portrait
-        // 进入全屏前先更新应用方向掩码，避免 full-screen controller
-        // 在 present 时仍拿到 portrait 掩码。
+        // 在 present/dismiss 开始前更新方向，避免等转场结束后才开始旋转。
         if isFullScreen {
             OrientationLock.landscape()
+        } else {
+            OrientationLock.portrait()
         }
         super.updateUI(isFullScreen: isFullScreen)
 
@@ -1075,25 +1076,22 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
                 return
             }
             self.waitingForFullscreenDismissal = false
-            // Request rotation only after KSPlayer's dismissal animation has
-            // completed, so its window-coordinate animation is not invalidated.
-            OrientationLock.portrait()
             self.waitForInlineLayout(generation: generation, attempt: 0)
         }
 
-        // Serialize app rotation after KSPlayer's dismissal transition. The
-        // view must remain untouched while the transition animator owns it.
+        // The render-view dismissal animation is disabled, so begin inline
+        // layout restoration as soon as the controller transition completes.
         if let coordinator = owningViewController?.transitionCoordinator {
             let registered = coordinator.animate(alongsideTransition: nil) { context in
                 completeDismissal(context.isCancelled)
             }
             if !registered {
-                scheduleInlineLayoutCheck(generation: generation, delay: 0.45) {
+                scheduleInlineLayoutCheck(generation: generation, delay: Self.inlineSettleStepDelay) {
                     completeDismissal(false)
                 }
             }
         } else {
-            scheduleInlineLayoutCheck(generation: generation, delay: 0.45) {
+            scheduleInlineLayoutCheck(generation: generation, delay: Self.inlineSettleStepDelay) {
                 completeDismissal(false)
             }
         }
