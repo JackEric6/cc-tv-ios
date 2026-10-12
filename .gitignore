@@ -8,7 +8,10 @@ DerivedData/
 .netrc
 /build
 /build-output
+/build-artifacts
+/artifacts
 /ipa
+/.artifacts
 CongcongTV-unsigned.ipa
 build.log
 TVBox-*.dmg
