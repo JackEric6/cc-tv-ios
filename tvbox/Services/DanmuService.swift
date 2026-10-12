@@ -36,8 +36,10 @@ public final class DanmuService {
     private var customSession: URLSession
     private let crossSourceCache = DanmakuLocalCache()
     private var searchCache: [String: (date: Date, results: [DanmuSearchResult])] = [:]
+    private var builtinSearchCache: [String: (date: Date, results: [DanmuSearchResult])] = [:]
     private var cueCache: [String: (date: Date, cues: [DanmuCue])] = [:]
     private var searchInFlight: [String: Task<[DanmuSearchResult], Error>] = [:]
+    private var builtinSearchInFlight: [String: Task<[DanmuSearchResult], Error>] = [:]
     private var cueInFlight: [String: Task<[DanmuCue], Error>] = [:]
 
     private init() {
@@ -256,18 +258,12 @@ public final class DanmuService {
     }
 
     private func performLoadSearchResult(_ result: DanmuSearchResult, cacheKey url: String) async throws -> [DanmuCue] {
-        var urls = [url]
-        if result.isBuiltin, var components = URLComponents(string: url) {
-            let filteredItems = components.queryItems?.filter { $0.name != "format" } ?? []
-            if filteredItems.count != (components.queryItems?.count ?? 0) {
-                components.queryItems = filteredItems.isEmpty ? nil : filteredItems
-                if let fallback = components.url?.absoluteString, fallback != url {
-                    urls.append(fallback)
-                }
-            }
-        }
+        let urls = result.isBuiltin ? Self.builtinCommentURLs(for: url) : [url]
+        var rateLimitedHosts = Set<String>()
         for candidateURL in urls {
             try Task.checkCancellation()
+            if let host = URL(string: candidateURL)?.host?.lowercased(),
+               rateLimitedHosts.contains(host) { continue }
             let body: String
             do {
                 body = try await getDanmakuText(
@@ -275,7 +271,10 @@ public final class DanmuService {
                     timeout: Self.commentRequestTimeout
                 )
             } catch let error as NetworkError {
-                if case .httpError(429) = error { return [] }
+                if case .httpError(429) = error,
+                   let host = URL(string: candidateURL)?.host?.lowercased() {
+                    rateLimitedHosts.insert(host)
+                }
                 continue
             } catch {
                 continue
@@ -286,16 +285,20 @@ public final class DanmuService {
                 cueCache[url] = (Date(), cues)
                 return cues
             }
-            if let nestedURL = Self.extractURL(from: body), nestedURL != candidateURL,
-               let nestedBody = try? await getDanmakuText(
-                from: nestedURL,
-                timeout: Self.commentRequestTimeout
-               ) {
-                let nestedCues = try await Self.parseOffMain(nestedBody)
-                if !nestedCues.isEmpty {
-                    pruneCachesIfNeeded()
-                    cueCache[url] = (Date(), nestedCues)
-                    return nestedCues
+            if let nestedURL = Self.extractURL(from: body), nestedURL != candidateURL {
+                do {
+                    let nestedBody = try await getDanmakuText(
+                        from: nestedURL,
+                        timeout: Self.commentRequestTimeout
+                    )
+                    let nestedCues = try await Self.parseOffMain(nestedBody)
+                    if !nestedCues.isEmpty {
+                        pruneCachesIfNeeded()
+                        cueCache[url] = (Date(), nestedCues)
+                        return nestedCues
+                    }
+                } catch {
+                    continue
                 }
             }
         }
@@ -313,6 +316,13 @@ public final class DanmuService {
                 .map(\.key)
             keys.forEach { searchCache.removeValue(forKey: $0) }
         }
+        if builtinSearchCache.count >= maxEntries {
+            let keys = builtinSearchCache
+                .sorted { $0.value.date < $1.value.date }
+                .prefix(builtinSearchCache.count - maxEntries + 1)
+                .map(\.key)
+            keys.forEach { builtinSearchCache.removeValue(forKey: $0) }
+        }
         if cueCache.count >= maxEntries {
             let keys = cueCache
                 .sorted { $0.value.date < $1.value.date }
@@ -328,7 +338,7 @@ public final class DanmuService {
         episode: String
     ) async -> [DanmuCue] {
         let candidates = Self.automaticLoadCandidates(results, title: title, episode: episode)
-        let batchSize = 4
+        let batchSize = 2
         for start in stride(from: 0, to: candidates.count, by: batchSize) {
             let batch = Array(candidates[start..<min(start + batchSize, candidates.count)])
             let cues = await withTaskGroup(of: [DanmuCue].self) { group in
@@ -361,36 +371,7 @@ public final class DanmuService {
         title: String,
         episode: String
     ) -> [DanmuSearchResult] {
-        let titleKey = DanmakuCacheKey.normalizeTitle(title)
-        let episodeNumber = extractEpisodeNumber(episode)
-        let isMovie = ["电影", "movie", "film"].contains { episode.localizedCaseInsensitiveContains($0) }
-        let promotionalTerms = [
-            "预告", "片花", "花絮", "宣传片", "先导片", "幕后", "片段", "剪辑",
-            "trailer", "teaser", "preview", "behind the scenes"
-        ]
-
-        return results.filter { result in
-            let label = result.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            let candidateText = "\(label) \(result.url)"
-            guard !promotionalTerms.contains(where: {
-                candidateText.localizedCaseInsensitiveContains($0)
-            }) else { return false }
-
-            let isURLLabel = URL(string: label)?.scheme != nil
-            let candidateTitle = DanmakuCacheKey.normalizeTitle(label)
-            guard isURLLabel || titleKey.isEmpty || candidateTitle.contains(titleKey) else {
-                return false
-            }
-
-            if episodeNumber > 0 {
-                return DanmakuEpisodeMatcher.matches(requestedEpisode: episode, title: label)
-            }
-            if isMovie || episode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return true
-            }
-            return DanmakuEpisodeMatcher.matches(requestedEpisode: episode, title: label)
-                || candidateTitle.contains(DanmakuCacheKey.normalizeTitle(episode))
-        }
+        DanmuCandidatePolicy.automaticLoadCandidates(results, title: title, episode: episode)
     }
 
     /// Providers run concurrently, but their configured priority determines
@@ -429,6 +410,32 @@ public final class DanmuService {
     }
 
     private func searchBuiltinResults(
+        baseURL: String,
+        query: String,
+        episode: String
+    ) async throws -> [DanmuSearchResult] {
+        let cacheKey = "\(baseURL.lowercased())\u{1E}\(query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())\u{1F}\(episode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())"
+        if let cached = builtinSearchCache[cacheKey], Date().timeIntervalSince(cached.date) < Self.cacheLifetime {
+            return cached.results
+        }
+        if let task = builtinSearchInFlight[cacheKey] {
+            return try await task.value
+        }
+        let task = Task<[DanmuSearchResult], Error> { @MainActor [weak self] in
+            guard let self else { return [] }
+            return try await self.performBuiltinSearch(baseURL: baseURL, query: query, episode: episode)
+        }
+        builtinSearchInFlight[cacheKey] = task
+        defer { builtinSearchInFlight[cacheKey] = nil }
+        let results = try await task.value
+        if !results.isEmpty {
+            pruneCachesIfNeeded()
+            builtinSearchCache[cacheKey] = (Date(), results)
+        }
+        return results
+    }
+
+    private func performBuiltinSearch(
         baseURL: String,
         query: String,
         episode: String
@@ -539,9 +546,9 @@ public final class DanmuService {
             func score(_ result: DanmuSearchResult) -> Int {
                 let name = result.name.lowercased()
                 var value = 0
-                if name.contains("电影") || name.contains("movie") { value += 30 }
+                if name.contains("电影") || name.contains("movie") || DanmuCandidatePolicy.isMovie(result.mediaType ?? "") { value += 30 }
                 if name.contains("电视剧") || name.contains("tv") { value -= 10 }
-                if ["片段", "预告", "花絮", " pv "].contains(where: { name.contains($0) }) { value -= 100 }
+                if DanmuCandidatePolicy.isPromotional(name) { value -= 100 }
                 if episodeNumber > 0 {
                     value += DanmakuEpisodeMatcher.matches(
                         requestedEpisode: episode,
@@ -591,15 +598,22 @@ public final class DanmuService {
             let name = ["name", "title", "episode", "vod_name"]
                 .map { jsonString(item[$0]) }
                 .first { !$0.isEmpty } ?? url
-            return DanmuSearchResult(name: name, url: url, isBuiltin: false)
+            return DanmuSearchResult(
+                name: name,
+                url: url,
+                isBuiltin: false,
+                mediaType: jsonString(item["typeDescription"] ?? item["type"])
+            )
         }
     }
 
     private nonisolated static func parseBuiltinSearchResults(_ body: String, baseURL: String) -> [DanmuSearchResult] {
         guard let object = jsonObject(body) else { return [] }
         var results: [DanmuSearchResult] = []
-        func appendEpisodes(_ value: [String: Any], prefix: String = "") {
+        func appendEpisodes(_ value: [String: Any], prefix: String = "", inheritedMediaType: String = "") {
             guard let episodes = value["episodes"] as? [[String: Any]] else { return }
+            let valueMediaType = firstString(value, keys: ["typeDescription", "type"])
+            let mediaType = valueMediaType.isEmpty ? inheritedMediaType : valueMediaType
             for episode in episodes {
                 let id = firstString(episode, keys: ["episodeId", "id"])
                 guard !id.isEmpty else { continue }
@@ -608,27 +622,41 @@ public final class DanmuService {
                 let videoURL = firstString(episode, keys: ["url", "videoURL", "videoUrl"])
                 let url = DanmuMatchRequestPolicy.commentURL(baseURL: baseURL, videoURL: videoURL)
                     ?? "\(baseURL)/api/v2/comment/\(urlPathEscape(id))?format=json"
-                results.append(DanmuSearchResult(name: label.isEmpty ? id : label, url: url, isBuiltin: true))
+                results.append(DanmuSearchResult(
+                    name: label.isEmpty ? id : label,
+                    url: url,
+                    isBuiltin: true,
+                    mediaType: mediaType
+                ))
             }
         }
 
         appendEpisodes(object)
         if let bangumi = object["bangumi"] as? [String: Any] {
-            appendEpisodes(bangumi, prefix: firstString(bangumi, keys: ["animeTitle", "title", "name"]))
+            appendEpisodes(
+                bangumi,
+                prefix: firstString(bangumi, keys: ["animeTitle", "title", "name"]),
+                inheritedMediaType: firstString(bangumi, keys: ["typeDescription", "type"])
+            )
         }
         if let data = object["data"] as? [String: Any] {
             appendEpisodes(data, prefix: firstString(data, keys: ["animeTitle", "title", "name"]))
             if let bangumi = data["bangumi"] as? [String: Any] {
-                appendEpisodes(bangumi, prefix: firstString(bangumi, keys: ["animeTitle", "title", "name"]))
+                appendEpisodes(
+                    bangumi,
+                    prefix: firstString(bangumi, keys: ["animeTitle", "title", "name"]),
+                    inheritedMediaType: firstString(data, keys: ["typeDescription", "type"])
+                )
             }
         }
         for key in ["animes", "anime", "data"] {
             guard let items = object[key] as? [[String: Any]] else { continue }
             for item in items {
                 let name = firstString(item, keys: ["animeTitle", "title", "name"])
-                appendEpisodes(item, prefix: name)
+                let mediaType = firstString(item, keys: ["typeDescription", "type"])
+                appendEpisodes(item, prefix: name, inheritedMediaType: mediaType)
                 if let bangumi = item["bangumi"] as? [String: Any] {
-                    appendEpisodes(bangumi, prefix: name)
+                    appendEpisodes(bangumi, prefix: name, inheritedMediaType: mediaType)
                 }
             }
         }
@@ -660,34 +688,19 @@ public final class DanmuService {
         title: String,
         episode: String
     ) async throws -> [DanmuCue] {
-        let number = Self.extractNumber(from: episode)
-        async let matchedTask = searchBuiltinMatches(
+        let candidates = try await searchBuiltinResults(
             baseURL: baseURL,
-            title: title,
-            episode: episode
-        )
-        async let focusedTask = number > 0
-            ? searchBuiltinEpisodes(baseURL: baseURL, query: title, episode: String(number))
-            : []
-        async let broadTask = searchBuiltinEpisodes(baseURL: baseURL, query: title, episode: nil)
-        let (matchedResults, focusedResults, broadResults) = await (
-            matchedTask,
-            focusedTask,
-            broadTask
-        )
-        let candidates = Self.prioritizeBuiltinResults(
-            matchedResults + focusedResults + broadResults,
             query: title,
             episode: episode
-        ).filter {
-            Self.automaticLoadCandidates([$0], title: title, episode: episode).isEmpty == false
-        }
+        )
         let directCues = await loadFirstAvailable(
             candidates,
             title: title,
             episode: episode
         )
         if !directCues.isEmpty { return directCues }
+        guard !candidates.isEmpty else { return [] }
+
         // Some servers return only anime search results from the episodes route.
         let titleVariants = Self.searchTitleVariants(title)
         let animeURL = try Self.makeURL(
@@ -755,7 +768,12 @@ public final class DanmuService {
                 videoURL: match.videoURL
             ) else { return nil }
             let name = match.displayTitle.isEmpty ? fileName : match.displayTitle
-            return DanmuSearchResult(name: name, url: commentURL, isBuiltin: true)
+            return DanmuSearchResult(
+                name: name,
+                url: commentURL,
+                isBuiltin: true,
+                mediaType: match.mediaType
+            )
         }
     }
 
@@ -835,6 +853,13 @@ public final class DanmuService {
                     throw NetworkError.invalidResponse
                 }
                 guard (200...299).contains(http.statusCode) else {
+                    if http.statusCode == 429, attempt < Self.requestRetryCount {
+                        let delay = Self.retryAfterDelay(for: http)
+                        if delay <= Self.retryMaxDelay {
+                            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                            continue
+                        }
+                    }
                     throw NetworkError.httpError(http.statusCode)
                 }
                 return Self.decodeText(data: data, response: http)
@@ -874,6 +899,22 @@ public final class DanmuService {
             NSURLErrorSecureConnectionFailed,
             NSURLErrorDataNotAllowed
         ].contains(nsError.code)
+    }
+
+    private static func retryAfterDelay(for response: HTTPURLResponse) -> TimeInterval {
+        if let value = response.value(forHTTPHeaderField: "Retry-After")?.trimmingCharacters(in: .whitespacesAndNewlines) {
+            if let seconds = TimeInterval(value), seconds >= 0 {
+                return seconds
+            }
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss zzz"
+            if let retryDate = formatter.date(from: value) {
+                return max(0, retryDate.timeIntervalSinceNow)
+            }
+        }
+        return min(Self.retryBaseDelay * 3, Self.retryMaxDelay)
     }
 
     private static func decodeText(data: Data, response: HTTPURLResponse) -> String {
@@ -964,6 +1005,37 @@ public final class DanmuService {
             result.removeLast("/87654321".count)
         }
         return result
+    }
+
+    private static func builtinCommentURLs(for value: String) -> [String] {
+        guard let original = URLComponents(string: value) else { return [value] }
+        let originalPath = original.path
+        guard let routeRange = originalPath.range(of: "/api/v2/comment") else {
+            return [value]
+        }
+        let route = String(originalPath[routeRange.lowerBound...])
+        var candidates = [value]
+        for api in [builtinAPI] + builtinFallbackAPIs {
+            guard let base = URLComponents(string: normalizeBaseURL(api)) else { continue }
+            var components = base
+            let basePath = base.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let routePath = route.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            components.path = "/" + ([basePath, routePath].filter { !$0.isEmpty }.joined(separator: "/"))
+            components.queryItems = original.queryItems
+            guard let formattedURL = components.url?.absoluteString else { continue }
+            candidates.append(formattedURL)
+
+            var withoutFormat = components
+            let queryItems = withoutFormat.queryItems?.filter { $0.name != "format" } ?? []
+            if queryItems.count != (withoutFormat.queryItems?.count ?? 0) {
+                withoutFormat.queryItems = queryItems.isEmpty ? nil : queryItems
+                if let fallbackURL = withoutFormat.url?.absoluteString {
+                    candidates.append(fallbackURL)
+                }
+            }
+        }
+        var seen = Set<String>()
+        return candidates.filter { seen.insert($0.lowercased()).inserted }
     }
 
     private nonisolated static func makeURL(

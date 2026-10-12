@@ -18,12 +18,14 @@ struct VerifyDanmuMatchAPI {
             "matches": [[
                 "animeTitle": "沉默的荣耀",
                 "episodeTitle": "第1集",
+                "typeDescription": "电视剧",
                 "url": "https://www.iqiyi.com/v_uf7dtof1l4.html"
             ]]
         ])
         let matches = DanmuMatchRequestPolicy.parseMatches(String(decoding: response, as: UTF8.self))
         precondition(matches.count == 1)
         precondition(matches[0].displayTitle == "沉默的荣耀 第1集")
+        precondition(matches[0].mediaType == "电视剧")
         let commentURL = DanmuMatchRequestPolicy.commentURL(
             baseURL: "https://danmu.example/token",
             videoURL: matches[0].videoURL

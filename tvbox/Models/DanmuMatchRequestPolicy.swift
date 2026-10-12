@@ -4,6 +4,7 @@ struct DanmuAPIMatch: Equatable, Sendable {
     let animeTitle: String
     let episodeTitle: String
     let videoURL: String
+    let mediaType: String
 
     var displayTitle: String {
         [animeTitle, episodeTitle].filter { !$0.isEmpty }.joined(separator: " ")
@@ -60,7 +61,8 @@ enum DanmuMatchRequestPolicy {
             return DanmuAPIMatch(
                 animeTitle: string(item["animeTitle"]),
                 episodeTitle: string(item["episodeTitle"]),
-                videoURL: url
+                videoURL: url,
+                mediaType: string(item["typeDescription"] ?? item["type"])
             )
         }
     }

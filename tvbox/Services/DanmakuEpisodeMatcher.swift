@@ -24,7 +24,7 @@ enum DanmakuEpisodeMatcher {
         return episodeNumber(in: title) == requestedNumber
     }
 
-    private static func episodeNumber(in value: String) -> Int? {
+    static func episodeNumber(in value: String) -> Int? {
         for pattern in markedNumberPatterns {
             if let number = captureNumber(pattern, in: value) { return number }
         }
