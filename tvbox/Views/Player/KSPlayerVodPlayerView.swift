@@ -5,6 +5,29 @@ import KSPlayer
 import AVKit
 import UIKit
 
+fileprivate enum PlaybackAspectRatio: String, CaseIterable {
+    case original = "原始"
+    case sixteenByNine = "16:9"
+    case stretch = "拉伸"
+    case fill = "铺满"
+    case crop = "裁剪"
+
+    var usesFixedViewport: Bool {
+        self == .sixteenByNine || self == .crop
+    }
+
+    var contentMode: UIView.ContentMode {
+        switch self {
+        case .original, .sixteenByNine:
+            return .scaleAspectFit
+        case .stretch:
+            return .scaleToFill
+        case .fill, .crop:
+            return .scaleAspectFill
+        }
+    }
+}
+
 extension Notification.Name {
     static let congcongPlaybackSessionWillChange = Notification.Name(
         "CongcongPlaybackSessionWillChange"
@@ -167,6 +190,11 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
     private var pendingSeekTarget: TimeInterval?
     private var seekRequestID = 0
     private var autoplayRetryWorkItem: DispatchWorkItem?
+    private var selectedAspectRatio: PlaybackAspectRatio = .original
+    private weak var aspectRatioRenderView: UIView?
+    private var aspectRatioEdgeConstraints: [NSLayoutConstraint] = []
+    private var aspectRatioViewportConstraints: [NSLayoutConstraint] = []
+    private var isAspectRatioFullscreen = false
 
     override var isMaskShow: Bool {
         didSet {
@@ -335,6 +363,63 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
         }
         applyTransparentSurfaces()
         syncInteractivePopGesture()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        applyDisplayAspectRatio(selectedAspectRatio, isFullscreenLandscape: isAspectRatioFullscreen)
+    }
+
+    fileprivate func applyDisplayAspectRatio(
+        _ ratio: PlaybackAspectRatio,
+        isFullscreenLandscape: Bool
+    ) {
+        selectedAspectRatio = ratio
+        isAspectRatioFullscreen = isFullscreenLandscape
+        guard let renderView = playerLayer?.player.view,
+              renderView.superview === self else { return }
+
+        if aspectRatioRenderView !== renderView {
+            NSLayoutConstraint.deactivate(aspectRatioViewportConstraints)
+            aspectRatioRenderView = renderView
+            aspectRatioEdgeConstraints = constraints.filter { constraint in
+                let referencesRenderView = (constraint.firstItem as? UIView) === renderView
+                    || (constraint.secondItem as? UIView) === renderView
+                let edgeAttribute = [.top, .bottom, .leading, .trailing].contains(constraint.firstAttribute)
+                return referencesRenderView && edgeAttribute
+            }
+            aspectRatioViewportConstraints = [
+                renderView.centerXAnchor.constraint(equalTo: centerXAnchor),
+                renderView.centerYAnchor.constraint(equalTo: centerYAnchor),
+                renderView.widthAnchor.constraint(equalTo: renderView.heightAnchor, multiplier: 16.0 / 9.0),
+                renderView.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor),
+                renderView.heightAnchor.constraint(lessThanOrEqualTo: heightAnchor)
+            ]
+            let matchHeight = renderView.heightAnchor.constraint(equalTo: heightAnchor)
+            let matchWidth = renderView.widthAnchor.constraint(equalTo: widthAnchor)
+            matchHeight.priority = .defaultHigh
+            matchWidth.priority = UILayoutPriority(749)
+            aspectRatioViewportConstraints.append(contentsOf: [matchHeight, matchWidth])
+        }
+
+        let usesViewport = ratio.usesFixedViewport && isFullscreenLandscape
+        if usesViewport {
+            let isWideViewport = bounds.width >= bounds.height
+            aspectRatioViewportConstraints
+                .filter { $0.firstAttribute == .height && $0.relation == .equal && ($0.secondItem as? UIView) === self }
+                .forEach { $0.priority = isWideViewport ? .defaultHigh : UILayoutPriority(749) }
+            aspectRatioViewportConstraints
+                .filter { $0.firstAttribute == .width && $0.relation == .equal && ($0.secondItem as? UIView) === self }
+                .forEach { $0.priority = isWideViewport ? UILayoutPriority(749) : .defaultHigh }
+            NSLayoutConstraint.deactivate(aspectRatioEdgeConstraints)
+            NSLayoutConstraint.activate(aspectRatioViewportConstraints)
+        } else {
+            NSLayoutConstraint.deactivate(aspectRatioViewportConstraints)
+            NSLayoutConstraint.activate(aspectRatioEdgeConstraints)
+        }
+
+        playerLayer?.player.contentMode = ratio.contentMode
+        renderView.setNeedsLayout()
     }
 
     deinit {
@@ -1703,6 +1788,8 @@ private struct KSPlayerUIView: UIViewRepresentable {
         private weak var danmakuView: DanmakuOverlayView?
         private weak var danmakuStatusLabel: UILabel?
         private var danmakuStatusDismissWorkItem: DispatchWorkItem?
+        private var isShowingDanmakuSearchToast = false
+        private var pendingDanmakuStatusToast: String?
         private var danmakuRetryWorkItem: DispatchWorkItem?
         private var danmakuRetryKey: String?
         private var danmakuRetryAttempt = 0
@@ -1714,6 +1801,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
         private var danmakuResultTask: Task<Void, Never>?
         private var danmakuSearchResults: [DanmuSearchResult] = []
         private var danmakuResultRequestID = UUID()
+        private var danmakuLayoutConstraints: [NSLayoutConstraint] = []
         private var lastPlayerTime: TimeInterval = 0
         private var lastPlayerDuration: TimeInterval = 0
         private var pendingDanmakuSeek: PendingDanmakuSeek?
@@ -1727,6 +1815,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
         private let verticalSeekStack = UIStackView()
         private let volumeButton = UIButton(type: .system)
         private let episodeButton = UIButton(type: .system)
+        private let aspectRatioButton = UIButton(type: .system)
         private let danmakuButton = UIButton(type: .system)
         private let introButton = UIButton(type: .system)
         private let outroButton = UIButton(type: .system)
@@ -1742,6 +1831,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
         private var canPlayNext = false
         private var canSelectEpisode = false
         private var isLandscape = false
+        private var selectedAspectRatio: PlaybackAspectRatio = .original
         private var volumeButtonState = PlaybackVolumeState()
         private var verticalSeekConstraints: [NSLayoutConstraint] = []
 
@@ -1878,13 +1968,8 @@ private struct KSPlayerUIView: UIViewRepresentable {
                     existing.removeFromSuperview()
                     view.contentOverlayView.addSubview(existing)
                     existing.translatesAutoresizingMaskIntoConstraints = false
-                    NSLayoutConstraint.activate([
-                        existing.leadingAnchor.constraint(equalTo: view.contentOverlayView.leadingAnchor),
-                        existing.trailingAnchor.constraint(equalTo: view.contentOverlayView.trailingAnchor),
-                        existing.topAnchor.constraint(equalTo: view.contentOverlayView.topAnchor),
-                        existing.bottomAnchor.constraint(equalTo: view.contentOverlayView.bottomAnchor)
-                    ])
                 }
+                updateDanmakuLayout(in: view)
                 existing.isHidden = !danmakuEnabled
                 existing.updateSettings(danmakuSettings)
                 loadDanmaku(into: existing)
@@ -1898,14 +1983,29 @@ private struct KSPlayerUIView: UIViewRepresentable {
             overlay.updateSettings(danmakuSettings)
             view.contentOverlayView.addSubview(overlay)
             overlay.layer.zPosition = 100
-            NSLayoutConstraint.activate([
-                overlay.leadingAnchor.constraint(equalTo: view.contentOverlayView.leadingAnchor),
-                overlay.trailingAnchor.constraint(equalTo: view.contentOverlayView.trailingAnchor),
-                overlay.topAnchor.constraint(equalTo: view.contentOverlayView.topAnchor),
-                overlay.bottomAnchor.constraint(equalTo: view.contentOverlayView.bottomAnchor)
-            ])
             danmakuView = overlay
+            updateDanmakuLayout(in: view)
             loadDanmaku(into: overlay)
+        }
+
+        private func updateDanmakuLayout(in view: IOSVideoPlayerView) {
+            NSLayoutConstraint.deactivate(danmakuLayoutConstraints)
+            let targetView: UIView
+            if selectedAspectRatio.usesFixedViewport,
+               isLandscape,
+               let renderView = view.playerLayer?.player.view {
+                targetView = renderView
+            } else {
+                targetView = view.contentOverlayView
+            }
+            guard let danmakuView else { return }
+            danmakuLayoutConstraints = [
+                danmakuView.leadingAnchor.constraint(equalTo: targetView.leadingAnchor),
+                danmakuView.trailingAnchor.constraint(equalTo: targetView.trailingAnchor),
+                danmakuView.topAnchor.constraint(equalTo: targetView.topAnchor),
+                danmakuView.bottomAnchor.constraint(equalTo: targetView.bottomAnchor)
+            ]
+            NSLayoutConstraint.activate(danmakuLayoutConstraints)
         }
 
         func tearDownDanmaku() {
@@ -1935,7 +2035,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             danmakuView?.update(currentTime: currentTime, duration: duration, playbackRate: currentPlaybackRate)
         }
 
-        private func loadDanmaku(into overlay: DanmakuOverlayView) {
+        private func loadDanmaku(into overlay: DanmakuOverlayView, showsSearchToast: Bool = true) {
             let title = danmakuTitle.trimmingCharacters(in: .whitespacesAndNewlines)
             let episode = danmakuEpisode.trimmingCharacters(in: .whitespacesAndNewlines)
             guard danmakuEnabled else { return }
@@ -1958,7 +2058,11 @@ private struct KSPlayerUIView: UIViewRepresentable {
             danmakuLoadRequestID = requestID
             loadingDanmakuKey = key
             overlay.clear()
-            setDanmakuStatus("正在搜索弹幕", showsToast: false)
+            if showsSearchToast {
+                showDanmakuSearchToast()
+            } else {
+                setDanmakuStatus("正在搜索弹幕", showsToast: false)
+            }
 
             danmakuTask = Task { @MainActor [weak self, weak overlay] in
                 let cues = await DanmuService.shared.loadCues(title: title, episode: episode)
@@ -2016,7 +2120,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
                       self.danmakuView === overlay else { return }
                 self.danmakuRetryWorkItem = nil
                 self.setDanmakuStatus("正在重试弹幕加载", showsToast: false)
-                self.loadDanmaku(into: overlay)
+                self.loadDanmaku(into: overlay, showsSearchToast: false)
             }
             danmakuRetryWorkItem = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
@@ -2060,6 +2164,12 @@ private struct KSPlayerUIView: UIViewRepresentable {
             danmakuStatusText = text
             updateDanmakuPanel()
             guard let label = danmakuStatusLabel else { return }
+            if isShowingDanmakuSearchToast {
+                if showsToast, text != "正在搜索弹幕" {
+                    pendingDanmakuStatusToast = text
+                }
+                return
+            }
             danmakuStatusDismissWorkItem?.cancel()
             guard showsToast else {
                 label.layer.removeAllAnimations()
@@ -2079,6 +2189,35 @@ private struct KSPlayerUIView: UIViewRepresentable {
             }
             danmakuStatusDismissWorkItem = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.5, execute: workItem)
+        }
+
+        private func showDanmakuSearchToast() {
+            danmakuStatusText = "正在搜索弹幕"
+            pendingDanmakuStatusToast = nil
+            updateDanmakuPanel()
+            guard let label = danmakuStatusLabel else { return }
+            danmakuStatusDismissWorkItem?.cancel()
+            isShowingDanmakuSearchToast = true
+            label.text = "  正在搜索弹幕  "
+            label.isHidden = false
+            UIView.animate(withDuration: 0.12) { label.alpha = 1 }
+            let workItem = DispatchWorkItem { [weak self, weak label] in
+                guard let self else { return }
+                self.isShowingDanmakuSearchToast = false
+                self.danmakuStatusDismissWorkItem = nil
+                if let pending = self.pendingDanmakuStatusToast {
+                    self.pendingDanmakuStatusToast = nil
+                    self.setDanmakuStatus(pending)
+                } else {
+                    UIView.animate(withDuration: 0.2) {
+                        label?.alpha = 0
+                    } completion: { _ in
+                        label?.isHidden = true
+                    }
+                }
+            }
+            danmakuStatusDismissWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.95, execute: workItem)
         }
 
         private func updateDanmakuPanel() {
@@ -2307,6 +2446,9 @@ private struct KSPlayerUIView: UIViewRepresentable {
             configureButton(volumeButton, imageName: "speaker.wave.2", label: "音量", action: #selector(volumePressed), weight: .light)
             setVolumeButtonIcon(isMuted: view.volumeViewSlider.value <= 0.02)
             configureButton(episodeButton, imageName: "list.bullet", label: "选集", action: #selector(selectEpisodePressed))
+            configureButton(aspectRatioButton, imageName: "aspectratio", label: "画面比例", action: #selector(aspectRatioPressed))
+            aspectRatioButton.menu = makeAspectRatioMenu()
+            aspectRatioButton.showsMenuAsPrimaryAction = true
             configureTextButton(danmakuButton, title: "弹幕", width: 40, label: "弹幕设置", action: #selector(danmakuPressed))
             configureMarkerButton(introButton, title: introLabel, label: "标记片头", action: #selector(markIntroPressed), resetAction: #selector(resetIntroPressed))
             configureMarkerButton(outroButton, title: outroLabel, label: "标记片尾", action: #selector(markOutroPressed), resetAction: #selector(resetOutroPressed))
@@ -2344,6 +2486,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
                 nextButton,
                 volumeButton,
                 toolbar.playbackRateButton,
+                aspectRatioButton,
                 episodeButton,
                 danmakuButton,
                 introButton,
@@ -2378,6 +2521,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             ensureWidthConstraint(toolbar.playbackRateButton, constant: 28, relation: .equal)
             toolbar.playbackRateButton.setContentCompressionResistancePriority(.required, for: .horizontal)
             episodeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+            aspectRatioButton.setContentCompressionResistancePriority(.required, for: .horizontal)
             danmakuButton.setContentCompressionResistancePriority(.required, for: .horizontal)
             toolbar.playButton.isEnabled = !isResolvingPlayback
             updateActionButtons(
@@ -2413,6 +2557,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             previousButton.alpha = canPlayPrevious ? 1 : 0.45
             nextButton.alpha = canPlayNext ? 1 : 0.45
             episodeButton.isHidden = !isLandscape || !canSelectEpisode
+            aspectRatioButton.isHidden = !isLandscape
             introButton.isHidden = false
             outroButton.isHidden = false
             rewindButton.isHidden = !isLandscape
@@ -2421,6 +2566,14 @@ private struct KSPlayerUIView: UIViewRepresentable {
             volumeButton.isHidden = false
             danmakuButton.isHidden = !isLandscape
             updateDanmakuButton()
+            aspectRatioButton.menu = makeAspectRatioMenu()
+            (playerView as? CongcongKSVideoPlayerView)?.applyDisplayAspectRatio(
+                selectedAspectRatio,
+                isFullscreenLandscape: isLandscape
+            )
+            if let playerView {
+                updateDanmakuLayout(in: playerView)
+            }
             applyControlVisibility()
         }
 
@@ -2456,9 +2609,11 @@ private struct KSPlayerUIView: UIViewRepresentable {
                 self.introButton.alpha = alpha
                 self.outroButton.alpha = alpha
                 self.danmakuButton.alpha = alpha
+                self.aspectRatioButton.alpha = alpha
                 self.introButton.isHidden = !self.controlsVisible
                 self.outroButton.isHidden = !self.controlsVisible
                 self.danmakuButton.isHidden = !self.controlsVisible || !self.isLandscape
+                self.aspectRatioButton.isHidden = !self.controlsVisible || !self.isLandscape
             }
         }
 
@@ -2588,6 +2743,31 @@ private struct KSPlayerUIView: UIViewRepresentable {
 
         @objc private func selectEpisodePressed() {
             onSelectEpisode?()
+        }
+
+        @objc private func aspectRatioPressed() {}
+
+        private func makeAspectRatioMenu() -> UIMenu {
+            UIMenu(title: "画面比例", children: PlaybackAspectRatio.allCases.map { ratio in
+                UIAction(
+                    title: ratio.rawValue,
+                    state: ratio == selectedAspectRatio ? .on : .off
+                ) { [weak self] _ in
+                    self?.selectAspectRatio(ratio)
+                }
+            })
+        }
+
+        private func selectAspectRatio(_ ratio: PlaybackAspectRatio) {
+            selectedAspectRatio = ratio
+            aspectRatioButton.menu = makeAspectRatioMenu()
+            (playerView as? CongcongKSVideoPlayerView)?.applyDisplayAspectRatio(
+                ratio,
+                isFullscreenLandscape: isLandscape
+            )
+            if let playerView {
+                updateDanmakuLayout(in: playerView)
+            }
         }
 
         @objc private func markIntroPressed() {

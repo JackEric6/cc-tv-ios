@@ -98,11 +98,8 @@ public final class DanmuService {
                 let directCues = try await Self.parseOffMain(body)
                 if !directCues.isEmpty { return directCues }
                 let results = Self.parseSearchResults(body)
-                let matchedResults = results.filter {
-                    DanmakuEpisodeMatcher.matches(requestedEpisode: episode, title: $0.name)
-                }
                 return await self.loadFirstAvailable(
-                    matchedResults.isEmpty && results.count == 1 ? results : matchedResults,
+                    results,
                     title: title,
                     episode: episode
                 )
@@ -330,14 +327,69 @@ public final class DanmuService {
         title: String,
         episode: String
     ) async -> [DanmuCue] {
-        await firstNonEmpty(from: Array(results.prefix(8))) { [weak self] result in
-            guard let self else { return [] }
-            do {
-                try Task.checkCancellation()
-                return try await self.loadSearchResult(result, title: title, episode: episode)
-            } catch {
+        let candidates = Self.automaticLoadCandidates(results, title: title, episode: episode)
+        let batchSize = 4
+        for start in stride(from: 0, to: candidates.count, by: batchSize) {
+            let batch = Array(candidates[start..<min(start + batchSize, candidates.count)])
+            let cues = await withTaskGroup(of: [DanmuCue].self) { group in
+                for result in batch {
+                    group.addTask { [weak self] in
+                        guard let self else { return [] }
+                        do {
+                            try Task.checkCancellation()
+                            return try await self.loadSearchResult(result, title: title, episode: episode)
+                        } catch {
+                            return []
+                        }
+                    }
+                }
+                while let result = await group.next() {
+                    if !result.isEmpty {
+                        group.cancelAll()
+                        return result
+                    }
+                }
                 return []
             }
+            if !cues.isEmpty { return cues }
+        }
+        return []
+    }
+
+    private nonisolated static func automaticLoadCandidates(
+        _ results: [DanmuSearchResult],
+        title: String,
+        episode: String
+    ) -> [DanmuSearchResult] {
+        let titleKey = DanmakuCacheKey.normalizeTitle(title)
+        let episodeNumber = extractEpisodeNumber(episode)
+        let isMovie = ["电影", "movie", "film"].contains { episode.localizedCaseInsensitiveContains($0) }
+        let promotionalTerms = [
+            "预告", "片花", "花絮", "宣传片", "先导片", "幕后", "片段", "剪辑",
+            "trailer", "teaser", "preview", "behind the scenes"
+        ]
+
+        return results.filter { result in
+            let label = result.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let candidateText = "\(label) \(result.url)"
+            guard !promotionalTerms.contains(where: {
+                candidateText.localizedCaseInsensitiveContains($0)
+            }) else { return false }
+
+            let isURLLabel = URL(string: label)?.scheme != nil
+            let candidateTitle = DanmakuCacheKey.normalizeTitle(label)
+            guard isURLLabel || titleKey.isEmpty || candidateTitle.contains(titleKey) else {
+                return false
+            }
+
+            if episodeNumber > 0 {
+                return DanmakuEpisodeMatcher.matches(requestedEpisode: episode, title: label)
+            }
+            if isMovie || episode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return true
+            }
+            return DanmakuEpisodeMatcher.matches(requestedEpisode: episode, title: label)
+                || candidateTitle.contains(DanmakuCacheKey.normalizeTitle(episode))
         }
     }
 
@@ -381,19 +433,25 @@ public final class DanmuService {
         query: String,
         episode: String
     ) async throws -> [DanmuSearchResult] {
-        let matchedResults = await searchBuiltinMatches(
+        let episodeNumber = Self.extractEpisodeNumber(episode)
+        async let matchedTask = searchBuiltinMatches(
             baseURL: baseURL,
             title: query,
             episode: episode
         )
-        let episodeNumber = Self.extractEpisodeNumber(episode)
-        let focusedResults = episodeNumber > 0
-            ? await searchBuiltinEpisodes(baseURL: baseURL, query: query, episode: String(episodeNumber))
+        async let focusedTask = episodeNumber > 0
+            ? searchBuiltinEpisodes(baseURL: baseURL, query: query, episode: String(episodeNumber))
             : []
-        let broadResults = await searchBuiltinEpisodes(baseURL: baseURL, query: query, episode: nil)
+        async let broadTask = searchBuiltinEpisodes(baseURL: baseURL, query: query, episode: nil)
+        let (matchedResults, focusedResults, broadResults) = await (
+            matchedTask,
+            focusedTask,
+            broadTask
+        )
         var allResults = matchedResults + focusedResults + broadResults
 
-        if allResults.isEmpty, let variant = Self.searchTitleVariants(query).first {
+        if Self.automaticLoadCandidates(allResults, title: query, episode: episode).isEmpty,
+           let variant = Self.searchTitleVariants(query).first {
             let animeURL = try Self.makeURL(
                 baseURL: baseURL,
                 path: "/api/v2/search/anime",
@@ -422,7 +480,8 @@ public final class DanmuService {
         }
 
         var seen = Set<String>()
-        let uniqueResults = allResults.filter { seen.insert($0.url).inserted }
+        let uniqueResults = Self.automaticLoadCandidates(allResults, title: query, episode: episode)
+            .filter { seen.insert($0.url).inserted }
         return Self.prioritizeBuiltinResults(uniqueResults, query: query, episode: episode)
     }
 
@@ -432,25 +491,41 @@ public final class DanmuService {
         episode: String?
     ) async -> [DanmuSearchResult] {
         let titleVariants = Self.searchTitleVariants(query)
-        return await firstNonEmpty(from: titleVariants) { [weak self] variant in
-            guard let self else { return [] }
-            guard let episodesURL = try? Self.makeURL(
-                baseURL: baseURL,
-                path: "/api/v2/search/episodes",
-                queryItems: [
-                    URLQueryItem(name: "anime", value: variant),
-                    episode.map { URLQueryItem(name: "episode", value: $0) }
-                ].compactMap { $0 }
-            ) else { return [] }
-            do {
-                let body = try await self.getDanmakuText(
-                    from: episodesURL.absoluteString,
-                    timeout: Self.searchRequestTimeout
-                )
-                return Self.parseBuiltinSearchResults(body, baseURL: baseURL)
-            } catch {
-                return []
+        return await withTaskGroup(of: [DanmuSearchResult].self) { group in
+            for variant in titleVariants {
+                group.addTask { [weak self] in
+                    guard let self,
+                          let episodesURL = try? Self.makeURL(
+                            baseURL: baseURL,
+                            path: "/api/v2/search/episodes",
+                            queryItems: [
+                                URLQueryItem(name: "anime", value: variant),
+                                episode.map { URLQueryItem(name: "episode", value: $0) }
+                            ].compactMap({ $0 })
+                          ) else { return [] }
+                    do {
+                        let body = try await self.getDanmakuText(
+                            from: episodesURL.absoluteString,
+                            timeout: Self.searchRequestTimeout
+                        )
+                        return Self.parseBuiltinSearchResults(body, baseURL: baseURL)
+                    } catch {
+                        return []
+                    }
+                }
             }
+            while let results = await group.next() {
+                let validResults = Self.automaticLoadCandidates(
+                    results,
+                    title: query,
+                    episode: episode ?? ""
+                )
+                if !validResults.isEmpty {
+                    group.cancelAll()
+                    return validResults
+                }
+            }
+            return []
         }
     }
 
@@ -585,36 +660,34 @@ public final class DanmuService {
         title: String,
         episode: String
     ) async throws -> [DanmuCue] {
-        let matchedResults = await searchBuiltinMatches(
+        let number = Self.extractNumber(from: episode)
+        async let matchedTask = searchBuiltinMatches(
             baseURL: baseURL,
             title: title,
             episode: episode
         )
-        let matchedCues = await loadFirstAvailable(
-            Array(matchedResults.prefix(1)),
-            title: title,
-            episode: episode
-        )
-        if !matchedCues.isEmpty { return matchedCues }
-
-        let number = Self.extractNumber(from: episode)
-        let focusedResults = number > 0
-            ? await searchBuiltinEpisodes(baseURL: baseURL, query: title, episode: String(number))
+        async let focusedTask = number > 0
+            ? searchBuiltinEpisodes(baseURL: baseURL, query: title, episode: String(number))
             : []
-        let broadResults = await searchBuiltinEpisodes(baseURL: baseURL, query: title, episode: nil)
+        async let broadTask = searchBuiltinEpisodes(baseURL: baseURL, query: title, episode: nil)
+        let (matchedResults, focusedResults, broadResults) = await (
+            matchedTask,
+            focusedTask,
+            broadTask
+        )
         let candidates = Self.prioritizeBuiltinResults(
-            focusedResults + broadResults,
+            matchedResults + focusedResults + broadResults,
             query: title,
             episode: episode
-        )
+        ).filter {
+            Self.automaticLoadCandidates([$0], title: title, episode: episode).isEmpty == false
+        }
         let directCues = await loadFirstAvailable(
-            Array(candidates.prefix(matchedResults.isEmpty ? 3 : 2)),
+            candidates,
             title: title,
             episode: episode
         )
         if !directCues.isEmpty { return directCues }
-        if !candidates.isEmpty { return [] }
-
         // Some servers return only anime search results from the episodes route.
         let titleVariants = Self.searchTitleVariants(title)
         let animeURL = try Self.makeURL(
@@ -630,22 +703,26 @@ public final class DanmuService {
         }
 
         let animeIDs = Self.findAnimeIDs(in: animeBody)
-        return await firstNonEmpty(from: Array(animeIDs.prefix(1))) { [weak self] animeID in
-            guard let self else { return [] }
+        for animeID in animeIDs {
+            try Task.checkCancellation()
             guard let bangumiURL = try? Self.makeURL(
                 baseURL: baseURL,
                 path: "/api/v2/bangumi/\(Self.urlPathEscape(animeID))",
                 queryItems: []
-            ), let bangumiBody = try? await self.getDanmakuText(
+            ), let bangumiBody = try? await getDanmakuText(
                 from: bangumiURL.absoluteString,
                 timeout: Self.searchRequestTimeout
-            ) else { return [] }
-            let matches = Self.findEpisodes(in: bangumiBody, requestedEpisode: episode)
-            return await self.firstNonEmpty(from: matches.prefix(1).map { $0.id }) { id in
-                guard let match = matches.first(where: { $0.id == id }) else { return [] }
-                return (try? await self.loadComments(baseURL: baseURL, match: match)) ?? []
-            }
+            ) else { continue }
+            let bangumiResults = Self.parseBuiltinSearchResults(bangumiBody, baseURL: baseURL)
+            let matchingResults = Self.automaticLoadCandidates(
+                bangumiResults,
+                title: title,
+                episode: episode
+            )
+            let cues = await loadFirstAvailable(matchingResults, title: title, episode: episode)
+            if !cues.isEmpty { return cues }
         }
+        return []
     }
 
     private func searchBuiltinMatches(
