@@ -1,55 +1,46 @@
 # 丛丛影视 iOS
 
-这是基于 [`Jstrom2022/tvbox-Swift`](https://github.com/Jstrom2022/tvbox-Swift) 整理的原生 SwiftUI iOS 应用，显示名称为“丛丛影视”，Bundle ID 为 `com.congcong.tv.ios`。
+基于 SwiftUI 的 iOS 点播应用，最低支持 iOS 17。工程配置的版本号为 `1.0.0`（build `1`），Bundle ID 为 `com.congcong.tv.xgzy`。中文系统下应用显示为“丛丛影视”。
 
-## 本版本范围
+## 功能概览
 
-- 只保留 iOS App target，最低系统版本为 iOS 17。
-- 默认配置为 `movie2_kktvs`：
-  `https://ghproxy.net/https://raw.githubusercontent.com/JackEric6/movie/refs/heads/main/movie2_kktvs`
-- 该远程文件仍可能含 Android `127.0.0.1` 本地代理地址；iOS 会将 KKT影视源的 loopback `source` 参数转换为直连 CMS API，不依赖本地 Gateway。
-- 关于页显示 `Made By 丛丛`。
-- 保留 SwiftUI、SwiftData、AVPlayer 和 VLCKit 播放能力。
-- 已移植本地 KKT影视适配逻辑：`vod_play_from`、`vod_play_url`、`$$$` 多线路、`#` 多集、`hxplayer`/`2mplayer` 以及播放器页中的直接媒体地址提取。
-- 不依赖 Gateway、雷电模拟器、JAR Bridge、Android Worker 或 `spider.jar`。
+- 内置 `tvbox/Resources/xgzy_config_all.json` 点播配置，包含 46 个影视源；默认启动使用包内配置，不请求旧的远程默认 JSON，并会将旧默认地址迁移到内置配置。
+- 多源首页、影视搜索与搜索建议；支持固定搜索源顺序及首页源设置。设置键 `7701`、`8801`、`9901` 分别选择瓜子、西瓜、荐片。
+- 多线路播放地址整理、按站点处理请求头与播放线路、失败后线路回退；提供 M3U8 净化和系统代理设置。
+- 弹幕自动搜索与手动选择，支持候选结果筛选、备用接口尝试、跨源本地缓存及播放时间轴同步。
+- 播放器支持横竖屏、选集、倍速和画面比例控制。
+- 下载页面支持直接媒体与 HLS 下载，并显示预估剩余时间。
+- 收藏、播放历史及本地配置持久化。
 
-## 目录
+影视源和第三方弹幕服务的可用性取决于对应服务端状态与网络环境；仓库中的验证脚本用于检查客户端规则，不代表所有外部源在任何时间均可用。
 
-```text
-tvbox/
-  Services/KktvsResponseNormalizer.swift  # KKT影视响应和播放线路整理
-  Services/SourceService.swift             # 分类、列表、详情、搜索和播放地址请求
-  Resources/movie2_kktvs.json              # 本地适配配置样本
-  tvboxApp.swift                            # 应用名称、默认配置和入口
-project.yml                                 # XcodeGen 工程模板
-.github/workflows/build-ios.yml             # macOS 云端构建 IPA
-README-Congcong.md                          # 简版说明
-```
+## 版本与迭代记录
+
+工程版本由 `project.yml` 中的 `MARKETING_VERSION` 和 `CURRENT_PROJECT_VERSION` 管理，当前为 `1.0.0 (1)`。功能迭代保留在 Git 提交历史中；`variant-xgzy-20260923` 的提交链已通过 merge commit 合入 `main`，未 squash。阶段摘要见 [CHANGELOG.md](CHANGELOG.md)，Actions 构建结果与对应提交见 [BUILD_HISTORY.md](BUILD_HISTORY.md)。
 
 ## GitHub Actions 构建 IPA
 
-Windows 不能运行 Xcode，因此不需要在本机反复编译。本仓库根目录就是 iOS 工程，工作流位于 `.github/workflows/build-ios.yml`。推送代码后：
+仓库包含 `.github/workflows/build-ios.yml`，在相关源码、配置、脚本或工程文件推送后自动运行，也可以手动触发：
 
-1. 打开仓库的 **Actions** 页面。
-2. 选择 **Build CongcongTV iOS IPA**。
-3. 点击 **Run workflow**，等待 macOS runner 完成。
-4. 在构建任务底部下载 `CongcongTV-unsigned-ipa` artifact。
-5. 解压得到 `CongcongTV-unsigned.ipa`。
+1. 打开 GitHub 仓库的 **Actions** 页面。
+2. 选择 **Build CongcongTV iOS IPA (XGZY)**，点击 **Run workflow** 并选择 `main`。
+3. 等待 macOS runner 完成验证和 Release 构建。
+4. 从运行结果的 Artifacts 下载 `CongcongTV-iOS-unsigned-ipa`，解压后得到 `CongcongTV-unsigned.ipa` 和 `build.log`。
 
-工作流会在 macOS runner 上执行 XcodeGen、Xcode 构建和 IPA 打包；本地产物是未签名 IPA，必须经过 SideStore 或 AltStore 使用 Apple ID 签名后才能安装到 iPhone。
+工作流会运行播放、配置、搜索、净化、弹幕和下载等 Swift 验证脚本，然后用 Xcode 构建并检查 App 元数据与内置配置。上传的是**未签名 IPA**，不能直接安装；请使用 SideStore、AltStore 等工具通过 Apple ID 签名后侧载。Actions 构建产物保存在 GitHub Actions Artifacts 中，不将大型二进制文件提交到 Git。
 
-## 使用 SideStore 安装
+## 安装说明
 
-1. 在 iPhone 上先完成 SideStore 的初始安装和 Apple ID 登录，并在 SideStore 中完成设备配对。
-2. 将下载的 `CongcongTV-unsigned.ipa` 保存到 iPhone 的“文件”App，或通过 AirDrop、网盘等方式传到手机。
-3. 在“文件”App 中点击 IPA，选择“共享”或“打开方式”，发送到 SideStore。
-4. 在 SideStore 的 **My Apps** 页面确认安装并等待签名完成。
-5. 首次打开时，如果系统提示开发者未受信任，进入“设置 > 通用 > VPN 与设备管理”信任对应 Apple ID。
-6. 免费 Apple ID 的侧载签名通常有有效期限制，SideStore 需要按其提示定期刷新应用；刷新时保持 iPhone 与 SideStore 的配对条件可用。
+1. 在 iPhone 上完成 SideStore 或 AltStore 的安装与设备配对。
+2. 从 GitHub Actions 下载并解压 `CongcongTV-iOS-unsigned-ipa`。
+3. 将 `CongcongTV-unsigned.ipa` 导入侧载工具，完成签名和安装。
+4. 如使用免费 Apple ID，按侧载工具提示定期刷新签名。
 
-如果 SideStore 无法导入，先确认 IPA 是完整下载的 `CongcongTV-unsigned.ipa`，不要直接把 `Payload` 文件夹导入；同时确认 SideStore 已经可以正常安装一个其他 IPA，再重新导入本应用。
+不同侧载工具的界面和签名要求可能不同；未签名 IPA 需要先签名，不能直接通过“文件”App 安装。
 
 ## 本地 macOS 构建
+
+需要 macOS、Xcode 及 XcodeGen：
 
 ```bash
 brew install xcodegen
@@ -64,14 +55,16 @@ xcodebuild \
   CODE_SIGNING_REQUIRED=NO
 ```
 
-## 配置说明
+Windows 环境不能运行 Xcode，请使用 GitHub Actions 完成 iOS 构建。
 
-`tvbox/Resources/movie2_kktvs.json` 是随 App 打包的本地样本；首次启动默认使用远程 `movie2_kktvs` 地址。用户在设置页手动修改配置后，应用会将修改后的地址保存在本机，下次启动优先使用已保存地址。
+## 目录
 
-本工程只实现标准 CMS JSON/XML 和 KKT影视当前适配，不执行 `type=3` JAR 动态脚本。若远程配置后续增加 JAR 源，应用会将其标记为暂不支持，而不会启动本地 Java 或 Gateway 服务。
-
-## 参考
-
-- 上游工程：`Jstrom2022/tvbox-Swift`
-- 本地 Android 适配参考：`apps/AVBox-main/app/src/main/java/com/github/tvbox/osc/server/KktvsCmsParser.java`
-- 默认配置：`movie2_kktvs`
+```text
+tvbox/                    iOS 应用源码、资源和内置点播配置
+Vendor/KSPlayer/          工程使用的 KSPlayer 源码
+scripts/                  Swift 验证脚本
+.github/workflows/        GitHub Actions 构建工作流
+project.yml               XcodeGen 工程定义和版本号
+CHANGELOG.md              功能阶段与版本迭代摘要
+BUILD_HISTORY.md          GitHub Actions 构建记录
+```
