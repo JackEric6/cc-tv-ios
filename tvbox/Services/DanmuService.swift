@@ -271,10 +271,16 @@ public final class DanmuService {
         }
         for candidateURL in urls {
             try Task.checkCancellation()
-            guard let body = try? await getDanmakuText(
-                from: candidateURL,
-                timeout: Self.commentRequestTimeout
-            ) else {
+            let body: String
+            do {
+                body = try await getDanmakuText(
+                    from: candidateURL,
+                    timeout: Self.commentRequestTimeout
+                )
+            } catch let error as NetworkError {
+                if case .httpError(429) = error { return [] }
+                continue
+            } catch {
                 continue
             }
             let cues = try await Self.parseOffMain(body)
@@ -380,36 +386,13 @@ public final class DanmuService {
             title: query,
             episode: episode
         )
-        if !matchedResults.isEmpty { return matchedResults }
-
         let episodeNumber = Self.extractEpisodeNumber(episode)
-        let episodeQueries = episodeNumber > 0 ? [String(episodeNumber), ""] : [""]
-        let requests = episodeQueries.flatMap { episodeQuery in
-            Self.searchTitleVariants(query).map { ($0, episodeQuery) }
-        }
-        let results: [DanmuSearchResult] = await firstNonEmpty(from: requests) { [weak self] request in
-            guard let self else { return [] }
-            let (variant, episodeQuery) = request
-            guard let episodesURL = try? Self.makeURL(
-                baseURL: baseURL,
-                path: "/api/v2/search/episodes",
-                queryItems: [
-                    URLQueryItem(name: "anime", value: variant),
-                    episodeQuery.isEmpty ? nil : URLQueryItem(name: "episode", value: episodeQuery)
-                ].compactMap { $0 }
-            ) else { return [] }
-            do {
-                let body = try await self.getDanmakuText(
-                    from: episodesURL.absoluteString,
-                    timeout: Self.searchRequestTimeout
-                )
-                return Self.parseBuiltinSearchResults(body, baseURL: baseURL)
-            } catch {
-                return []
-            }
-        }
+        let focusedResults = episodeNumber > 0
+            ? await searchBuiltinEpisodes(baseURL: baseURL, query: query, episode: String(episodeNumber))
+            : []
+        let broadResults = await searchBuiltinEpisodes(baseURL: baseURL, query: query, episode: nil)
+        var allResults = matchedResults + focusedResults + broadResults
 
-        var allResults = results
         if allResults.isEmpty, let variant = Self.searchTitleVariants(query).first {
             let animeURL = try Self.makeURL(
                 baseURL: baseURL,
@@ -440,7 +423,68 @@ public final class DanmuService {
 
         var seen = Set<String>()
         let uniqueResults = allResults.filter { seen.insert($0.url).inserted }
-        return uniqueResults
+        return Self.prioritizeBuiltinResults(uniqueResults, query: query, episode: episode)
+    }
+
+    private func searchBuiltinEpisodes(
+        baseURL: String,
+        query: String,
+        episode: String?
+    ) async -> [DanmuSearchResult] {
+        let titleVariants = Self.searchTitleVariants(query)
+        return await firstNonEmpty(from: titleVariants) { [weak self] variant in
+            guard let self else { return [] }
+            guard let episodesURL = try? Self.makeURL(
+                baseURL: baseURL,
+                path: "/api/v2/search/episodes",
+                queryItems: [
+                    URLQueryItem(name: "anime", value: variant),
+                    episode.map { URLQueryItem(name: "episode", value: $0) }
+                ].compactMap { $0 }
+            ) else { return [] }
+            do {
+                let body = try await self.getDanmakuText(
+                    from: episodesURL.absoluteString,
+                    timeout: Self.searchRequestTimeout
+                )
+                return Self.parseBuiltinSearchResults(body, baseURL: baseURL)
+            } catch {
+                return []
+            }
+        }
+    }
+
+    private static func prioritizeBuiltinResults(
+        _ results: [DanmuSearchResult],
+        query: String,
+        episode: String
+    ) -> [DanmuSearchResult] {
+        let episodeNumber = extractEpisodeNumber(episode)
+        return results.enumerated().sorted { lhs, rhs in
+            func score(_ result: DanmuSearchResult) -> Int {
+                let name = result.name.lowercased()
+                var value = 0
+                if name.contains("电影") || name.contains("movie") { value += 30 }
+                if name.contains("电视剧") || name.contains("tv") { value -= 10 }
+                if ["片段", "预告", "花絮", " pv "].contains(where: { name.contains($0) }) { value -= 100 }
+                if episodeNumber > 0 {
+                    value += DanmakuEpisodeMatcher.matches(
+                        requestedEpisode: episode,
+                        title: result.name
+                    ) ? 100 : -20
+                }
+                let normalizedQuery = DanmakuCacheKey.normalizeTitle(query)
+                if !normalizedQuery.isEmpty,
+                   DanmakuCacheKey.normalizeTitle(result.name).contains(normalizedQuery) {
+                    value += 5
+                }
+                return value
+            }
+            let leftScore = score(lhs.element)
+            let rightScore = score(rhs.element)
+            return leftScore == rightScore ? lhs.offset < rhs.offset : leftScore > rightScore
+        }
+        .map(\.element)
     }
 
     private static func parseSearchResults(_ body: String) -> [DanmuSearchResult] {
@@ -486,7 +530,9 @@ public final class DanmuService {
                 guard !id.isEmpty else { continue }
                 let title = firstString(episode, keys: ["episodeTitle", "title", "name"])
                 let label = [prefix, title].filter { !$0.isEmpty }.joined(separator: " ")
-                let url = "\(baseURL)/api/v2/comment/\(urlPathEscape(id))?format=json"
+                let videoURL = firstString(episode, keys: ["url", "videoURL", "videoUrl"])
+                let url = DanmuMatchRequestPolicy.commentURL(baseURL: baseURL, videoURL: videoURL)
+                    ?? "\(baseURL)/api/v2/comment/\(urlPathEscape(id))?format=json"
                 results.append(DanmuSearchResult(name: label.isEmpty ? id : label, url: url, isBuiltin: true))
             }
         }
@@ -544,47 +590,33 @@ public final class DanmuService {
             title: title,
             episode: episode
         )
-        let episodeMatches = matchedResults.filter {
-            DanmakuEpisodeMatcher.matches(requestedEpisode: episode, title: $0.name)
-        }
-        let prioritizedMatches = episodeMatches.isEmpty && matchedResults.count == 1
-            ? matchedResults
-            : episodeMatches
         let matchedCues = await loadFirstAvailable(
-            Array(prioritizedMatches.prefix(4)),
+            Array(matchedResults.prefix(1)),
             title: title,
             episode: episode
         )
         if !matchedCues.isEmpty { return matchedCues }
 
         let number = Self.extractNumber(from: episode)
-        let queries = number > 0 ? [String(number), ""] : [""]
-        let titleVariants = Self.searchTitleVariants(title)
-        let requests = queries.flatMap { query in titleVariants.map { ($0, query) } }
-        let directCues: [DanmuCue] = await firstNonEmpty(from: requests) { [weak self] request in
-            guard let self else { return [] }
-            let (titleVariant, query) = request
-            guard let searchURL = try? Self.makeURL(
-                baseURL: baseURL,
-                path: "/api/v2/search/episodes",
-                queryItems: [
-                    URLQueryItem(name: "anime", value: titleVariant),
-                    query.isEmpty ? nil : URLQueryItem(name: "episode", value: query)
-                ].compactMap { $0 }
-            ) else { return [] }
-            guard let body = try? await self.getDanmakuText(
-                from: searchURL.absoluteString,
-                timeout: Self.searchRequestTimeout
-            ) else { return [] }
-            let matches = Self.findEpisodes(in: body, requestedEpisode: episode)
-            return await self.firstNonEmpty(from: matches.prefix(4).map { $0.id }) { id in
-                guard let match = matches.first(where: { $0.id == id }) else { return [] }
-                return (try? await self.loadComments(baseURL: baseURL, match: match)) ?? []
-            }
-        }
+        let focusedResults = number > 0
+            ? await searchBuiltinEpisodes(baseURL: baseURL, query: title, episode: String(number))
+            : []
+        let broadResults = await searchBuiltinEpisodes(baseURL: baseURL, query: title, episode: nil)
+        let candidates = Self.prioritizeBuiltinResults(
+            focusedResults + broadResults,
+            query: title,
+            episode: episode
+        )
+        let directCues = await loadFirstAvailable(
+            Array(candidates.prefix(matchedResults.isEmpty ? 3 : 2)),
+            title: title,
+            episode: episode
+        )
         if !directCues.isEmpty { return directCues }
+        if !candidates.isEmpty { return [] }
 
         // Some servers return only anime search results from the episodes route.
+        let titleVariants = Self.searchTitleVariants(title)
         let animeURL = try Self.makeURL(
             baseURL: baseURL,
             path: "/api/v2/search/anime",
@@ -598,7 +630,7 @@ public final class DanmuService {
         }
 
         let animeIDs = Self.findAnimeIDs(in: animeBody)
-        return await firstNonEmpty(from: Array(animeIDs.prefix(4))) { [weak self] animeID in
+        return await firstNonEmpty(from: Array(animeIDs.prefix(1))) { [weak self] animeID in
             guard let self else { return [] }
             guard let bangumiURL = try? Self.makeURL(
                 baseURL: baseURL,
@@ -609,7 +641,7 @@ public final class DanmuService {
                 timeout: Self.searchRequestTimeout
             ) else { return [] }
             let matches = Self.findEpisodes(in: bangumiBody, requestedEpisode: episode)
-            return await self.firstNonEmpty(from: matches.prefix(4).map { $0.id }) { id in
+            return await self.firstNonEmpty(from: matches.prefix(1).map { $0.id }) { id in
                 guard let match = matches.first(where: { $0.id == id }) else { return [] }
                 return (try? await self.loadComments(baseURL: baseURL, match: match)) ?? []
             }
@@ -651,6 +683,23 @@ public final class DanmuService {
     }
 
     private func loadComments(baseURL: String, match: EpisodeMatch) async throws -> [DanmuCue] {
+        if !match.videoURL.isEmpty,
+           let commentURL = DanmuMatchRequestPolicy.commentURL(baseURL: baseURL, videoURL: match.videoURL) {
+            do {
+                let comments = try await getDanmakuText(
+                    from: commentURL,
+                    timeout: Self.commentRequestTimeout
+                )
+                let cues = try await Self.parseOffMain(comments)
+                if !cues.isEmpty { return cues }
+            } catch let error as NetworkError {
+                if case .httpError(429) = error { throw error }
+                // Continue with the comment-id route for older compatible servers.
+            } catch {
+                // Continue with the comment-id route for older compatible servers.
+            }
+        }
+
         // Some deployments reject the optional format query with 404 while
         // returning the same JSON from the canonical path. Keep both forms,
         // matching the Android client's tolerant behaviour.
@@ -660,14 +709,20 @@ public final class DanmuService {
         ]
         for (path, queryItems) in paths {
             guard let commentURL = try? Self.makeURL(baseURL: baseURL, path: path, queryItems: queryItems),
-                  let comments = try? await getDanmakuText(
+                  !commentURL.absoluteString.isEmpty else { continue }
+            let comments: String
+            do {
+                comments = try await getDanmakuText(
                     from: commentURL.absoluteString,
                     timeout: Self.commentRequestTimeout
-                  ) else {
+                )
+            } catch let error as NetworkError {
+                if case .httpError(429) = error { throw error }
                 continue
-            }
+            } catch { continue }
             let cues = try await Self.parseOffMain(comments)
             if !cues.isEmpty { return cues }
+            break
         }
         return []
     }
@@ -726,7 +781,7 @@ public final class DanmuService {
     private static func shouldRetry(_ error: Error) -> Bool {
         if let networkError = error as? NetworkError {
             if case .httpError(let status) = networkError {
-                return [408, 425, 429, 500, 502, 503, 504].contains(status)
+                return [408, 425, 500, 502, 503, 504].contains(status)
             }
             return false
         }
@@ -896,6 +951,7 @@ public final class DanmuService {
     private struct EpisodeMatch {
         let id: String
         let title: String
+        let videoURL: String
     }
 
     private nonisolated static func findAnimeIDs(in body: String) -> [String] {
@@ -926,7 +982,11 @@ public final class DanmuService {
             let title = firstString(item, keys: ["episodeTitle", "title", "name"])
             let rawNumber = firstString(item, keys: ["episodeNumber", "number", "sort"])
             let number = parseEpisodeNumber(rawNumber)
-            let match = EpisodeMatch(id: id, title: title)
+            let match = EpisodeMatch(
+                id: id,
+                title: title,
+                videoURL: firstString(item, keys: ["url", "videoURL", "videoUrl"])
+            )
             if DanmakuEpisodeMatcher.matches(
                 requestedEpisode: requestedEpisode,
                 title: title,
@@ -948,7 +1008,8 @@ public final class DanmuService {
                     guard !id.isEmpty else { return nil }
                     return EpisodeMatch(
                         id: id,
-                        title: firstString(item, keys: ["episodeTitle", "title", "name"])
+                        title: firstString(item, keys: ["episodeTitle", "title", "name"]),
+                        videoURL: firstString(item, keys: ["url", "videoURL", "videoUrl"])
                     )
                 }
                 if let preferred = movieMatches.first(where: {
@@ -967,7 +1028,8 @@ public final class DanmuService {
                     guard !id.isEmpty else { return nil }
                     return EpisodeMatch(
                         id: id,
-                        title: firstString(item, keys: ["episodeTitle", "title", "name"])
+                        title: firstString(item, keys: ["episodeTitle", "title", "name"]),
+                        videoURL: firstString(item, keys: ["url", "videoURL", "videoUrl"])
                     )
                 }
             }

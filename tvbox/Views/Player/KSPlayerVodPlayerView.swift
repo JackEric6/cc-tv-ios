@@ -106,9 +106,18 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
     private weak var interactivePopGestureRecognizer: UIGestureRecognizer?
     private weak var inlineSuperview: UIView?
     private var inlineFrameConstraints: [NSLayoutConstraint] = []
-    private var inlineFrame = CGRect.zero
     private var inlineTranslatesAutoresizingMaskIntoConstraints = false
     private var restoreTask: DispatchWorkItem?
+    private var inlineRestorationGeneration = 0
+    private var waitingForFullscreenDismissal = false
+    /// 逐帧跟随容器 bounds 时的稳定计数/上一次采样值。
+    private var settleStableFrames = 0
+    private var settleLastBounds = CGRect.zero
+    /// 旋转未结束前仍以 60fps 跟随容器，避免画面被旧 frame 卡住。
+    private static let inlineSettleStepDelay: TimeInterval = 1.0 / 60.0
+    private static let inlineSettleStableFrames = 3
+    /// 收尾前至少跟随的帧数（约 0.2s），覆盖 KSPlayer 迟到的 frame 写入。
+    private static let inlineSettleMinimumFrames = 12
     // KSPlayer moves this exact view into its native full-screen controller.
     // Keep the playback layer alive until the view has been reattached inline.
     private var preservingFullscreenPlayer = false
@@ -170,6 +179,8 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
         if isFullScreen {
             restoreTask?.cancel()
             restoreTask = nil
+            inlineRestorationGeneration &+= 1
+            waitingForFullscreenDismissal = false
             preservingFullscreenPlayer = true
             captureInlineLayout()
         } else {
@@ -177,19 +188,17 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
             // native completion reattaches the same view; only then can it be
             // treated as an ordinary inline SwiftUI view again.
             preservingFullscreenPlayer = true
+            waitingForFullscreenDismissal = true
         }
 
         // KSPlayer 的原生全屏控制器会在呈现完成后写入同一个全局掩码。
         // 这里提前写入，确保 UIKit 在 present 的那一帧就允许横屏，避免
         // 被应用默认的 portrait 掩码卡住。
         KSOptions.supportedInterfaceOrientations = isFullScreen ? .landscapeRight : .portrait
-        // 先更新应用方向掩码，再让 KSPlayer 执行 present/dismiss。否则
-        // full-screen controller 可能在同一帧拿到 portrait 掩码，表现为黑屏
-        // 或播放器被挪到错误的布局位置。
+        // 进入全屏前先更新应用方向掩码，避免 full-screen controller
+        // 在 present 时仍拿到 portrait 掩码。
         if isFullScreen {
             OrientationLock.landscape()
-        } else {
-            OrientationLock.portrait()
         }
         super.updateUI(isFullScreen: isFullScreen)
 
@@ -935,20 +944,21 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
         // KSPlayer performs the actual reparenting in its dismissal
         // completion. Restore constraints only after that callback, never by
         // racing it with an early addSubview from our side.
-        if !landscapeButton.isSelected, superview === inlineSuperview {
-            restoreInlineLayout()
+        if !waitingForFullscreenDismissal,
+           !landscapeButton.isSelected,
+           superview === inlineSuperview {
+            waitForInlineLayout(generation: inlineRestorationGeneration, attempt: 0)
         }
         syncInteractivePopGesture()
     }
 
     private func captureInlineLayout() {
         guard let container = superview else { return }
-        if inlineSuperview === container, !inlineFrameConstraints.isEmpty {
+        if inlineSuperview === container {
             return
         }
         inlineSuperview = container
         inlineFrameConstraints = inlineLayoutConstraints(in: container)
-        inlineFrame = frame
         inlineTranslatesAutoresizingMaskIntoConstraints = translatesAutoresizingMaskIntoConstraints
     }
 
@@ -970,44 +980,177 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
 
     private func scheduleInlineRestoration() {
         restoreTask?.cancel()
-        let task = DispatchWorkItem { [weak self] in
-            self?.restoreInlineLayout()
+        inlineRestorationGeneration &+= 1
+        let generation = inlineRestorationGeneration
+        let completeDismissal: (Bool) -> Void = { [weak self] wasCancelled in
+            guard let self,
+                  self.inlineRestorationGeneration == generation else { return }
+            if wasCancelled {
+                self.waitingForFullscreenDismissal = false
+                return
+            }
+            self.waitingForFullscreenDismissal = false
+            // Request rotation only after KSPlayer's dismissal animation has
+            // completed, so its window-coordinate animation is not invalidated.
+            OrientationLock.portrait()
+            self.waitForInlineLayout(generation: generation, attempt: 0)
         }
-        restoreTask = task
 
-        // Wait for KSPlayer's PlayerTransitionAnimator to finish before
-        // restoring the inline constraints. Reattaching during the animation
-        // is what causes the view to briefly jump to the window's top-left.
+        // Serialize app rotation after KSPlayer's dismissal transition. The
+        // view must remain untouched while the transition animator owns it.
         if let coordinator = owningViewController?.transitionCoordinator {
-            coordinator.animate(alongsideTransition: nil) { [weak self] _ in
-                self?.restoreInlineLayout()
+            let registered = coordinator.animate(alongsideTransition: nil) { context in
+                completeDismissal(context.isCancelled)
+            }
+            if !registered {
+                scheduleInlineLayoutCheck(generation: generation, delay: 0.45) {
+                    completeDismissal(false)
+                }
+            }
+        } else {
+            scheduleInlineLayoutCheck(generation: generation, delay: 0.45) {
+                completeDismissal(false)
             }
         }
-        // Covers rotation and dismissals without a transition coordinator.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: task)
     }
 
-    private func restoreInlineLayout() {
-        guard !landscapeButton.isSelected, let container = inlineSuperview else { return }
+    private func waitForInlineLayout(generation: Int, attempt: Int) {
+        guard inlineRestorationGeneration == generation,
+              !landscapeButton.isSelected,
+              let container = inlineSuperview else { return }
+        if attempt == 0 {
+            resetInlineSettling()
+        }
+
+        guard superview === container else {
+            // KSPlayer 还没把播放器放回内联容器；等它的 dismiss completion。
+            guard attempt < 90 else {
+                restoreInlineLayout(in: container)
+                return
+            }
+            scheduleInlineLayoutCheck(generation: generation, delay: Self.inlineSettleStepDelay) { [weak self] in
+                self?.waitForInlineLayout(generation: generation, attempt: attempt + 1)
+            }
+            return
+        }
+
+        // 不管窗口是否已经转回竖屏，先把播放器锁定到容器当前的真实尺寸。
+        // KSPlayer 的 dismiss completion 会写入进入全屏前捕获的 frame，那是
+        // 旧坐标系的值，会让画面先缩成左上角的小方块再弹回。这里在旋转的每
+        // 一帧都跟着容器走，画面就随容器一起平滑变化。
+        applyInlineFrame(container.bounds)
+
+        if container.bounds.equalTo(settleLastBounds) {
+            settleStableFrames += 1
+        } else {
+            settleStableFrames = 0
+            settleLastBounds = container.bounds
+        }
+
+        // 容器尺寸连续几帧不再变化，说明旋转的布局已经稳定下来。
+        // 同时要求至少跟随若干帧：KSPlayer 的 dismissal completion 可能比
+        // 转场协调器的回调晚一点写入它缓存的 frame，过早收尾会被它覆盖。
+        let settled = settleStableFrames >= Self.inlineSettleStableFrames
+            && attempt >= Self.inlineSettleMinimumFrames
+        guard settled || attempt >= 90 else {
+            scheduleInlineLayoutCheck(generation: generation, delay: Self.inlineSettleStepDelay) { [weak self] in
+                self?.waitForInlineLayout(generation: generation, attempt: attempt + 1)
+            }
+            return
+        }
+
+        restoreInlineLayout(in: container)
+    }
+
+    private func scheduleInlineLayoutCheck(
+        generation: Int,
+        delay: TimeInterval,
+        action: @escaping () -> Void
+    ) {
+        restoreTask?.cancel()
+        let task = DispatchWorkItem { [weak self] in
+            guard let self, self.inlineRestorationGeneration == generation else { return }
+            action()
+        }
+        restoreTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: task)
+    }
+
+    private func restoreInlineLayout(in container: UIView) {
+        guard !landscapeButton.isSelected, superview === container else { return }
         restoreTask?.cancel()
         restoreTask = nil
 
-        // The native KSPlayer transition owns reparenting. If it has not
-        // completed yet, leave the view where KSPlayer put it and let
-        // didMoveToSuperview call us again after the dismissal callback.
-        guard superview === container else { return }
         translatesAutoresizingMaskIntoConstraints = inlineTranslatesAutoresizingMaskIntoConstraints
         if inlineFrameConstraints.isEmpty {
+            // SwiftUI owns this representable's frame. Reapplying the value
+            // captured before rotation writes coordinates from the old layout.
             translatesAutoresizingMaskIntoConstraints = true
-            frame = inlineFrame
         } else {
             NSLayoutConstraint.activate(inlineFrameConstraints)
         }
+        applyInlineFrame(container.bounds)
+        resetInlineSettling()
         applyTransparentSurfaces()
         container.setNeedsLayout()
         container.layoutIfNeeded()
+        setNeedsLayout()
         updateUI(isLandscape: false)
         preservingFullscreenPlayer = false
+
+        // 最后再校验一次：KSPlayer 的 completion 或旋转的收尾布局有可能在
+        // 这里之后才写 frame，把它拉回容器真实尺寸，避免残留错位。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self,
+                  !self.landscapeButton.isSelected,
+                  self.superview === container else { return }
+            self.applyInlineFrame(container.bounds)
+        }
+    }
+
+    /// 把播放器同步到内联容器的当前尺寸。
+    ///
+    /// 退出全屏时窗口正在旋转，容器每一帧的尺寸都不一样。用容器的实时
+    /// bounds 而不是缓存的 frame，画面就会跟着容器一起变化；同时打开
+    /// autoresizing，让容器 bounds 变化时 UIKit 自动跟随，避免轮询之间的
+    /// 空档出现错位。
+    private func applyInlineFrame(_ bounds: CGRect) {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        if needsFrameUpdate(frame, bounds) {
+            frame = bounds
+        }
+        resetRenderLayerFrame()
+    }
+
+    /// KSPlayer 的转场动画会把真正渲染视频的 view 搬到 window 级容器上做
+    /// 缩放动画，结束后只把它插回原父视图，frame/transform 仍是动画终态。
+    /// 播放器容器自己被 SwiftUI 重新布局，这层却不会，于是画面停在错误的
+    /// 位置和尺寸上——这正是"缩到左上角"的那一块。这里按父视图当前 bounds
+    /// 复位。只在转场结束后调用，转场期间调用会打断动画。
+    private func resetRenderLayerFrame() {
+        guard let renderView = playerLayer?.player.view? else { return }
+        if renderView.transform != .identity {
+            renderView.transform = .identity
+        }
+        guard let parent = renderView.superview else { return }
+        let target = parent.bounds
+        guard target.width > 0, target.height > 0 else { return }
+        if needsFrameUpdate(renderView.frame, target) {
+            renderView.frame = target
+        }
+    }
+
+    private func needsFrameUpdate(_ current: CGRect, _ target: CGRect) -> Bool {
+        abs(current.origin.x - target.origin.x) > 0.5
+            || abs(current.origin.y - target.origin.y) > 0.5
+            || abs(current.size.width - target.size.width) > 0.5
+            || abs(current.size.height - target.size.height) > 0.5
+    }
+
+    private func resetInlineSettling() {
+        settleStableFrames = 0
+        settleLastBounds = .zero
     }
 
     fileprivate var isPreservingFullscreenPlayer: Bool {
@@ -1675,7 +1818,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             danmakuSearchPanel = nil
             danmakuSearchResults = []
             danmakuView?.clear()
-            setDanmakuStatus("正在搜索弹幕")
+            setDanmakuStatus("正在搜索弹幕", showsToast: false)
             guard let danmakuView else { return }
             loadDanmaku(into: danmakuView)
         }
@@ -1815,7 +1958,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             danmakuLoadRequestID = requestID
             loadingDanmakuKey = key
             overlay.clear()
-            setDanmakuStatus("正在搜索弹幕")
+            setDanmakuStatus("正在搜索弹幕", showsToast: false)
 
             danmakuTask = Task { @MainActor [weak self, weak overlay] in
                 let cues = await DanmuService.shared.loadCues(title: title, episode: episode)
@@ -1832,8 +1975,13 @@ private struct KSPlayerUIView: UIViewRepresentable {
                     self.loadedDanmakuKey = key
                     self.setDanmakuStatus("已加载 \(cues.count) 条弹幕")
                 } else {
-                    self.setDanmakuStatus("暂未获取到弹幕，稍后重试")
-                    self.scheduleDanmakuRetry(for: key, requestID: requestID, overlay: overlay)
+                    if self.danmakuRetryAttempt < 2 {
+                        self.setDanmakuStatus("暂未获取到弹幕，稍后重试", showsToast: false)
+                        self.scheduleDanmakuRetry(for: key, requestID: requestID, overlay: overlay)
+                    } else {
+                        self.cancelDanmakuRetry(resetAttempts: true)
+                        self.setDanmakuStatus("暂未获取到弹幕")
+                    }
                 }
                 overlay.setCues(cues)
                 overlay.isHidden = !self.danmakuEnabled || cues.isEmpty
@@ -1867,7 +2015,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
                       self.danmakuRetryKey == key,
                       self.danmakuView === overlay else { return }
                 self.danmakuRetryWorkItem = nil
-                self.setDanmakuStatus("正在重试弹幕加载")
+                self.setDanmakuStatus("正在重试弹幕加载", showsToast: false)
                 self.loadDanmaku(into: overlay)
             }
             danmakuRetryWorkItem = workItem
@@ -1908,11 +2056,17 @@ private struct KSPlayerUIView: UIViewRepresentable {
             danmakuStatusLabel = label
         }
 
-        private func setDanmakuStatus(_ text: String) {
+        private func setDanmakuStatus(_ text: String, showsToast: Bool = true) {
             danmakuStatusText = text
             updateDanmakuPanel()
             guard let label = danmakuStatusLabel else { return }
             danmakuStatusDismissWorkItem?.cancel()
+            guard showsToast else {
+                label.layer.removeAllAnimations()
+                label.alpha = 0
+                label.isHidden = true
+                return
+            }
             label.text = "  \(text)  "
             label.isHidden = false
             UIView.animate(withDuration: 0.16) { label.alpha = 1 }
@@ -2053,13 +2207,13 @@ private struct KSPlayerUIView: UIViewRepresentable {
                     title: danmakuSearchResults[$0].name
                 )
             }
-            let candidateIndices = matchingIndices.isEmpty
-                ? [index]
-                : [index] + matchingIndices.filter { $0 > index } + matchingIndices.filter { $0 < index }
+            let otherIndices = danmakuSearchResults.indices.filter { $0 != index }
+            let matchingOthers = otherIndices.filter { matchingIndices.contains($0) }
+            let candidateIndices = [index] + matchingOthers + otherIndices.filter { !matchingIndices.contains($0) }
             var seenIndices = Set<Int>()
             let attempts = candidateIndices
                 .filter { seenIndices.insert($0).inserted }
-                .prefix(8)
+                .prefix(3)
                 .map { danmakuSearchResults[$0] }
             panel.update(results: danmakuSearchResults, status: "正在加载第 1 / \(attempts.count) 条", loading: true)
 

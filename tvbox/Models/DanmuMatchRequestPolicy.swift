@@ -66,9 +66,12 @@ enum DanmuMatchRequestPolicy {
     }
 
     static func commentURL(baseURL: String, videoURL: String) -> String? {
+        guard let media = URLComponents(string: videoURL),
+              let mediaScheme = media.scheme?.lowercased(),
+              ["http", "https"].contains(mediaScheme),
+              media.host != nil else { return nil }
         guard let base = URL(string: baseURL),
-              var components = URLComponents(url: base, resolvingAgainstBaseURL: false),
-              URL(string: videoURL) != nil else { return nil }
+              var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return nil }
         let basePath = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         components.path = "/" + ([basePath, "api/v2/comment"].filter { !$0.isEmpty }.joined(separator: "/"))
         components.queryItems = [

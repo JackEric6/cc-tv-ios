@@ -32,6 +32,7 @@ struct VerifyDanmuMatchAPI {
         precondition(components?.path == "/token/api/v2/comment")
         precondition(components?.queryItems?.first(where: { $0.name == "url" })?.value == matches[0].videoURL)
         precondition(components?.queryItems?.first(where: { $0.name == "format" })?.value == "json")
+        precondition(DanmuMatchRequestPolicy.commentURL(baseURL: "https://danmu.example", videoURL: "") == nil)
 
         let unmatched = #"{"isMatched":false,"matches":[{"url":"https://example.com/a"}]}"#
         precondition(DanmuMatchRequestPolicy.parseMatches(unmatched).isEmpty)
