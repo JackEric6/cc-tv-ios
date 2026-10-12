@@ -52,6 +52,10 @@ class SettingsViewModel: ObservableObject {
     @Published var vlcBufferMode: VLCBufferMode = .defaultMode
     /// 快进/快退步长（秒）。
     @Published var playTimeStep: Int = 10
+    /// 是否在播放前净化 M3U8 广告分片。
+    @Published var m3u8Purify: Bool = true
+    /// 是否让应用网络请求使用系统代理，默认关闭。
+    @Published var useSystemProxy: Bool = false
     /// 缓存占用展示文本。
     @Published var cacheSizeString: String = "0 KB"
     
@@ -70,6 +74,12 @@ class SettingsViewModel: ObservableObject {
     /// 3) 回填播放/缓存相关设置
     init() {
         let defaults = UserDefaults.standard
+        CongcongBrand.migrateLegacyDefaultConfig(in: defaults)
+        if defaults.object(forKey: M3U8PurifierSettings.key) == nil {
+            defaults.set(true, forKey: M3U8PurifierSettings.key)
+        }
+        m3u8Purify = defaults.bool(forKey: M3U8PurifierSettings.key)
+        useSystemProxy = NetworkProxyPolicy.useSystemProxy
         let savedVod = defaults.string(forKey: HawkConfig.API_URL) ?? CongcongBrand.defaultConfigURL
         vodApiUrl = savedVod
         if let savedLive = defaults.string(forKey: HawkConfig.LIVE_API_URL) {
@@ -84,9 +94,14 @@ class SettingsViewModel: ObservableObject {
         let defaultLiveRaw = PlayerEngine.isVLCAvailable
             ? PlayerEngine.vlc.rawValue
             : PlayerEngine.system.rawValue
+        #if os(iOS)
+        // iOS 点播已固定使用系统 AVPlayer；旧版本保存的播放器值仅作兼容占位。
+        defaults.set(PlayerEngine.system.rawValue, forKey: HawkConfig.PLAY_TYPE_VOD)
+        #else
         if defaults.object(forKey: HawkConfig.PLAY_TYPE_VOD) == nil {
             defaults.set(hasLegacyPlayer ? legacyPlayerRaw : defaultVodRaw, forKey: HawkConfig.PLAY_TYPE_VOD)
         }
+        #endif
         if defaults.object(forKey: HawkConfig.PLAY_TYPE_LIVE) == nil {
             defaults.set(hasLegacyPlayer ? legacyPlayerRaw : defaultLiveRaw, forKey: HawkConfig.PLAY_TYPE_LIVE)
         }
@@ -186,6 +201,9 @@ class SettingsViewModel: ObservableObject {
         vodUrl: String,
         liveUrl: String
     ) async throws -> PendingMultiRepoSelection? {
+        if vodUrl.lowercased().hasPrefix("bundle://") {
+            return nil
+        }
         if let vodOptions = try await ApiConfig.shared.fetchMultiRepoOptions(from: vodUrl) {
             guard !vodOptions.isEmpty else {
                 throw ConfigError.parseError("点播多仓库配置中没有可用地址")
@@ -200,6 +218,9 @@ class SettingsViewModel: ObservableObject {
         let normalizedVod = ApiConfig.normalizeConfigUrl(vodUrl)
         let normalizedLive = ApiConfig.normalizeConfigUrl(liveUrl)
         guard normalizedLive != normalizedVod else {
+            return nil
+        }
+        if liveUrl.lowercased().hasPrefix("bundle://") {
             return nil
         }
         
@@ -254,12 +275,34 @@ class SettingsViewModel: ObservableObject {
         playTimeStep = step
         UserDefaults.standard.set(step, forKey: HawkConfig.PLAY_TIME_STEP)
     }
+
+    /// 设置 M3U8 净化开关。
+    func setM3U8Purify(_ enabled: Bool) {
+        m3u8Purify = enabled
+        UserDefaults.standard.set(enabled, forKey: M3U8PurifierSettings.key)
+    }
+
+    /// 设置应用网络是否跟随系统代理。新建的网络会话会立即使用该策略。
+    func setUseSystemProxy(_ enabled: Bool) {
+        useSystemProxy = enabled
+        NetworkProxyPolicy.setUseSystemProxy(enabled)
+        NetworkManager.shared.reloadSessionForProxySetting()
+        DanmuService.shared.reloadSessionForProxySetting()
+        ImageLoader.shared.reloadSessionForProxySetting()
+        Task {
+            await GuaziService.shared.reloadSessionForProxySetting()
+        }
+    }
     
     /// 设置点播播放器内核
     func setVodPlayerEngine(_ engine: PlayerEngine) {
+        #if os(iOS)
+        return
+        #else
         guard playerEngineOptions.contains(engine) else { return }
         vodPlayerEngine = engine
         UserDefaults.standard.set(engine.rawValue, forKey: HawkConfig.PLAY_TYPE_VOD)
+        #endif
     }
     
     /// 设置直播播放器内核

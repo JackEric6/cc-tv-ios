@@ -12,16 +12,19 @@ settings:
     CODE_SIGN_STYLE: Automatic
 
 packages:
+  KSPlayer:
+    path: Vendor/KSPlayer
   VLCKitSPM:
     url: https://github.com/tylerjonesio/vlckit-spm
     from: 3.6.0
-
 targets:
   CongcongTV:
     type: application
     platform: iOS
     deploymentTarget: "17.0"
     dependencies:
+      - package: KSPlayer
+        product: KSPlayer
       - package: VLCKitSPM
         product: VLCKitSPM
     sources:
@@ -29,13 +32,16 @@ targets:
         excludes:
           - Info.plist
           - Resources/movie2_kktvs.json
+          - Resources/xgzy_config_all.json
       - path: tvbox/Resources/movie2_kktvs.json
+        buildPhase: resources
+      - path: tvbox/Resources/xgzy_config_all.json
         buildPhase: resources
       - path: tvbox/Resources/zh-Hans.lproj/InfoPlist.strings
         buildPhase: resources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.congcong.tv.ios
+        PRODUCT_BUNDLE_IDENTIFIER: com.congcong.tv.xgzy
         PRODUCT_NAME: CongcongTV
         INFOPLIST_FILE: tvbox/Info.plist
         GENERATE_INFOPLIST_FILE: YES

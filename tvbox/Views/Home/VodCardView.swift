@@ -17,8 +17,15 @@ struct VodCardPressStyle: ButtonStyle {
 struct VodCardView: View {
     /// 卡片对应的视频数据。
     let video: Movie.Video
+    /// 可选来源角标；默认不显示，保证首页、历史和收藏调用兼容。
+    let sourceLabel: String?
     /// 悬停状态（主要用于 macOS 悬停放大动效）。
     @State private var isHovered = false
+
+    init(video: Movie.Video, sourceLabel: String? = nil) {
+        self.video = video
+        self.sourceLabel = sourceLabel
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -58,6 +65,35 @@ struct VodCardView: View {
                         )
                         .padding(8)
                 }
+
+                // 豆瓣评分固定在海报右下角，避免与左侧备注重叠。
+                if !video.formattedDoubanRating.isEmpty {
+                    Text(video.formattedDoubanRating)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule().fill(Color.black.opacity(0.72))
+                        )
+                        .padding(8)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                }
+
+                // 来源角标固定在海报右下区域；评分存在时放在其上方，避免重叠。
+                if let sourceLabel, !sourceLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text(sourceLabel)
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(Color.black.opacity(0.78))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .padding(.trailing, 8)
+                        .padding(.bottom, video.formattedDoubanRating.isEmpty ? 8 : 34)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                }
             }
             // 悬停缩放只增强视觉反馈，不影响点击命中区域。
             .scaleEffect(isHovered ? 1.05 : 1.0)
@@ -86,7 +122,7 @@ struct VodCardView: View {
         .contentShape(Rectangle())
         #endif
     }
-    
+
     /// 海报占位图，避免图片加载失败导致卡片高度塌陷。
     private var placeholderImage: some View {
         RoundedRectangle(cornerRadius: AppTheme.cardRadius)

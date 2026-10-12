@@ -4,19 +4,16 @@ import SwiftUI
 struct SettingsView: View {
     enum ApiInputType {
         case vod
-        case live
         
         var title: String {
             switch self {
             case .vod: return "点播接口地址"
-            case .live: return "直播接口地址"
             }
         }
         
         var placeholder: String {
             switch self {
             case .vod: return "请输入点播接口地址"
-            case .live: return "请输入直播接口地址（可留空跟随点播）"
             }
         }
     }
@@ -27,65 +24,34 @@ struct SettingsView: View {
     @State private var showApiInput = false
     @State private var editingApiType: ApiInputType = .vod
     @State private var showAbout = false
-    @State private var sourceSearchText = ""
     @State private var showingPicker: PickerType = .none
     
     enum PickerType {
         case none
-        case vodPlayer
-        case livePlayer
         case decode
         case vlcBuffer
         case playTimeStep
+        case m3u8Purify
+        case systemProxy
+    }
+
+    enum BinaryChoice: String, CaseIterable, Identifiable {
+        case enabled
+        case disabled
+
+        var id: String { rawValue }
+
+        var title: String {
+            self == .enabled ? "开启" : "关闭"
+        }
     }
     
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 24) {
-                    // API 配置
-                    SectionCard(title: "数据源") {
-                        SettingsRow(
-                            icon: "film",
-                            title: "点播接口地址",
-                            value: viewModel.vodApiUrl.isEmpty ? "未配置" : viewModel.vodApiUrl
-                        ) {
-                            editingApiType = .vod
-                            showApiInput = true
-                        }
-                        Divider().background(Color.white.opacity(0.1))
-                        SettingsRow(
-                            icon: "tv",
-                            title: "直播接口地址",
-                            value: viewModel.liveApiUrl.isEmpty ? "跟随点播接口" : viewModel.liveApiUrl
-                        ) {
-                            editingApiType = .live
-                            showApiInput = true
-                        }
-                        Divider().background(Color.white.opacity(0.1))
-                        if !apiConfig.sourceBeanList.isEmpty {
-                            NavigationLink {
-                                sourcePickerView
-                            } label: {
-                                SettingsRow(icon: "server.rack", title: "主页数据源", value: apiConfig.homeSourceBean?.name ?? "", action: nil)
-                            }
-                        }
-                    }
-                    
                     // 播放设置
                     SectionCard(title: "播放设置") {
-                        SettingsRow(icon: "play.rectangle", title: "点播播放器", value: viewModel.vodPlayerEngine.title) {
-                            if viewModel.playerEngineOptions.count > 1 {
-                                showingPicker = .vodPlayer
-                            }
-                        }
-                        Divider().background(Color.white.opacity(0.1))
-                        SettingsRow(icon: "dot.radiowaves.left.and.right", title: "直播播放器", value: viewModel.livePlayerEngine.title) {
-                            if viewModel.playerEngineOptions.count > 1 {
-                                showingPicker = .livePlayer
-                            }
-                        }
-                        Divider().background(Color.white.opacity(0.1))
                         SettingsRow(icon: "cpu", title: "视频解码", value: viewModel.decodeMode.title) {
                             showingPicker = .decode
                         }
@@ -98,6 +64,24 @@ struct SettingsView: View {
                         Divider().background(Color.white.opacity(0.1))
                         SettingsRow(icon: "forward", title: "快进步长", value: "\(viewModel.playTimeStep)秒") {
                             showingPicker = .playTimeStep
+                        }
+                        Divider().background(Color.white.opacity(0.1))
+                        SettingsRow(
+                            icon: "wand.and.stars",
+                            title: "M3U8 净化",
+                            value: viewModel.m3u8Purify ? "开启" : "关闭",
+                            iconColor: .orange
+                        ) {
+                            showingPicker = .m3u8Purify
+                        }
+                        Divider().background(Color.white.opacity(0.1))
+                        SettingsRow(
+                            icon: "network",
+                            title: "使用系统代理",
+                            value: viewModel.useSystemProxy ? "开启" : "关闭",
+                            iconColor: .orange
+                        ) {
+                            showingPicker = .systemProxy
                         }
                     }
                     
@@ -113,6 +97,12 @@ struct SettingsView: View {
                             FavoritesView()
                         } label: {
                             SettingsRow(icon: "heart", title: "我的收藏", value: "", action: nil)
+                        }
+                        Divider().background(Color.white.opacity(0.1))
+                        NavigationLink {
+                            FeedbackSuggestionView()
+                        } label: {
+                            SettingsRow(icon: "bubble.left.and.bubble.right", title: "反馈建议", value: "", action: nil)
                         }
                     }
                     
@@ -134,8 +124,6 @@ struct SettingsView: View {
                         SettingsRow(icon: "globe", title: "站点数量", value: "\(apiConfig.sourceBeanList.count)", action: nil)
                         Divider().background(Color.white.opacity(0.1))
                         SettingsRow(icon: "wand.and.stars", title: "解析数量", value: "\(apiConfig.parseBeanList.count)", action: nil)
-                        Divider().background(Color.white.opacity(0.1))
-                        SettingsRow(icon: "tv", title: "直播分组", value: "\(apiConfig.liveChannelGroupList.count)", action: nil)
                     }
                 }
                 .padding(.horizontal, 20)
@@ -160,32 +148,6 @@ struct SettingsView: View {
     @ViewBuilder
     private var pickerOverlay: some View {
         switch showingPicker {
-        case .vodPlayer:
-            SelectionModal(
-                title: "选择点播播放器",
-                icon: "play.rectangle.fill",
-                items: viewModel.playerEngineOptions,
-                selectedItem: viewModel.vodPlayerEngine,
-                itemTitle: { $0.title },
-                onSelect: { engine in
-                    viewModel.setVodPlayerEngine(engine)
-                    showingPicker = .none
-                },
-                onCancel: { showingPicker = .none }
-            )
-        case .livePlayer:
-            SelectionModal(
-                title: "选择直播播放器",
-                icon: "dot.radiowaves.left.and.right",
-                items: viewModel.playerEngineOptions,
-                selectedItem: viewModel.livePlayerEngine,
-                itemTitle: { $0.title },
-                onSelect: { engine in
-                    viewModel.setLivePlayerEngine(engine)
-                    showingPicker = .none
-                },
-                onCancel: { showingPicker = .none }
-            )
         case .decode:
             SelectionModal(
                 title: "视频解码模式",
@@ -221,6 +183,34 @@ struct SettingsView: View {
                 itemTitle: { "\($0) 秒" },
                 onSelect: { step in
                     viewModel.setPlayTimeStep(step)
+                    showingPicker = .none
+                },
+                onCancel: { showingPicker = .none }
+            )
+        case .m3u8Purify:
+            SelectionModal(
+                title: "M3U8 净化",
+                icon: "wand.and.stars",
+                accentColor: .yellow,
+                items: BinaryChoice.allCases,
+                selectedItem: viewModel.m3u8Purify ? .enabled : .disabled,
+                itemTitle: { $0.title },
+                onSelect: { choice in
+                    viewModel.setM3U8Purify(choice == .enabled)
+                    showingPicker = .none
+                },
+                onCancel: { showingPicker = .none }
+            )
+        case .systemProxy:
+            SelectionModal(
+                title: "使用系统代理",
+                icon: "network",
+                accentColor: .yellow,
+                items: BinaryChoice.allCases,
+                selectedItem: viewModel.useSystemProxy ? .enabled : .disabled,
+                itemTitle: { $0.title },
+                onSelect: { choice in
+                    viewModel.setUseSystemProxy(choice == .enabled)
                     showingPicker = .none
                 },
                 onCancel: { showingPicker = .none }
@@ -374,8 +364,6 @@ struct SettingsView: View {
         switch editingApiType {
         case .vod:
             return $viewModel.vodApiUrl
-        case .live:
-            return $viewModel.liveApiUrl
         }
     }
     
@@ -387,122 +375,95 @@ struct SettingsView: View {
         #endif
     }
     
-    // MARK: - 源选择
-    
-    private var filteredSources: [SourceBean] {
-        let sources = apiConfig.sourceBeanList
-        if sourceSearchText.isEmpty {
-            return sources
-        } else {
-            return sources.filter { $0.name.localizedCaseInsensitiveContains(sourceSearchText) || $0.api.localizedCaseInsensitiveContains(sourceSearchText) }
-        }
+}
+
+private struct FeedbackSuggestionView: View {
+    @State private var feedback = ""
+    @EnvironmentObject private var appState: AppState
+    @State private var submissionMessage = ""
+
+    private let feedbackStorageKey = "congcong.feedback.records"
+
+    private var trimmedFeedback: String {
+        feedback.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var sourcePickerView: some View {
-        VStack(spacing: 0) {
-            // 搜索栏
-            HStack {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
-                TextField("搜索数据源", text: $sourceSearchText)
-                    .textFieldStyle(.plain)
-                if !sourceSearchText.isEmpty {
-                    Button(action: { sourceSearchText = "" }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $feedback)
+                    .scrollContentBackground(.hidden)
+                    .foregroundColor(.white)
+                    .padding(8)
+                    .frame(minHeight: 220)
+                    .background(Color.white.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                if feedback.isEmpty {
+                    Text("请描述你遇到的问题或建议…")
+                        .foregroundColor(.white.opacity(0.4))
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 16)
+                        .allowsHitTesting(false)
                 }
             }
-            .padding(12)
-            .glassCard(cornerRadius: 12)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
-            
-            ScrollView {
-                LazyVStack(spacing: 12) {
-                    ForEach(filteredSources) { source in
-                        Button {
-                            apiConfig.setHomeSource(source)
-                            appState.currentSourceKey = source.key
-                        } label: {
-                            HStack(alignment: .center, spacing: 16) {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    HStack(spacing: 8) {
-                                        Text(source.name)
-                                            .font(.system(size: 16, weight: .semibold))
-                                            .foregroundColor(source.isSupportedInSwift ? .white : .white.opacity(0.5))
-                                        
-                                        // 类型标签
-                                        Text(source.typeDescription)
-                                            .font(.system(size: 10, weight: .bold))
-                                            .foregroundColor(source.isSupportedInSwift ? .orange : .gray)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 3)
-                                            .background(
-                                                Capsule().fill(
-                                                    source.isSupportedInSwift ? Color.orange.opacity(0.2) : Color.gray.opacity(0.2)
-                                                )
-                                            )
-                                        
-                                        if !source.isSupportedInSwift {
-                                            Text("暂不支持")
-                                                .font(.system(size: 10, weight: .medium))
-                                                .foregroundColor(.red.opacity(0.8))
-                                                .padding(.horizontal, 6)
-                                                .padding(.vertical, 3)
-                                                .background(Capsule().fill(Color.red.opacity(0.15)))
-                                        }
-                                    }
-                                    
-                                    Text(source.api)
-                                        .font(.system(size: 12))
-                                        .foregroundColor(.white.opacity(0.5))
-                                        .lineLimit(1)
-                                }
-                                
-                                Spacer()
-                                
-                                HStack(spacing: 12) {
-                                    if source.isSearchable {
-                                        Image(systemName: "magnifyingglass")
-                                            .font(.system(size: 14, weight: .medium))
-                                            .foregroundColor(.green.opacity(0.8))
-                                    }
-                                    
-                                    if source.key == apiConfig.homeSourceBean?.key {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .font(.system(size: 20))
-                                            .foregroundColor(.orange)
-                                    } else {
-                                        Circle()
-                                            .strokeBorder(Color.white.opacity(0.2), lineWidth: 1)
-                                            .frame(width: 20, height: 20)
-                                    }
-                                }
-                            }
-                            .padding(16)
-                            .glassCard(cornerRadius: 16)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 16)
-                                    .stroke(
-                                        source.key == apiConfig.homeSourceBean?.key ? Color.orange.opacity(0.5) : Color.clear,
-                                        lineWidth: 1
-                                    )
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 24)
+
+            Button(action: saveFeedback) {
+                Label("提交", systemImage: "checkmark")
+                    .font(.body.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 13)
+                    .background(trimmedFeedback.isEmpty ? Color.gray.opacity(0.35) : Color.orange)
+                    .foregroundColor(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
             }
+            .buttonStyle(.plain)
+            .disabled(trimmedFeedback.isEmpty)
+
+            if !submissionMessage.isEmpty {
+                Text(submissionMessage)
+                    .font(.subheadline)
+                    .foregroundColor(.white.opacity(0.8))
+                    .accessibilityAddTraits(.updatesFrequently)
+            }
+
+            Spacer(minLength: 0)
         }
+        .padding(20)
         .background(AppTheme.primaryGradient.ignoresSafeArea())
-        .navigationTitle("选择数据源")
+        .navigationTitle("反馈建议")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
+    }
+
+    private func saveFeedback() {
+        guard !trimmedFeedback.isEmpty else { return }
+
+        if let selection = HomeSourceSelectionPolicy.selection(forSettingsCode: trimmedFeedback) {
+            setHomeSource(key: selection.key, title: selection.title)
+            return
+        }
+
+        var records = UserDefaults.standard.stringArray(forKey: feedbackStorageKey) ?? []
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        records.append("\(timestamp)\n\(trimmedFeedback)")
+        UserDefaults.standard.set(records, forKey: feedbackStorageKey)
+        feedback = ""
+        submissionMessage = "已提交"
+    }
+
+    private func setHomeSource(key: String, title: String) {
+        guard let source = appState.apiConfig.sourceBeanList.first(where: {
+            $0.key.caseInsensitiveCompare(key) == .orderedSame && $0.isSelectable
+        }) else {
+            submissionMessage = "当前配置中没有可用的\(title)源"
+            return
+        }
+        appState.apiConfig.setHomeSource(source)
+        appState.applyLoadedConfigState(refreshHome: true)
+        feedback = ""
+        submissionMessage = "已切换为\(title)首页"
     }
 }
 
@@ -532,6 +493,8 @@ struct SettingsRow: View {
     let icon: String
     let title: String
     let value: String
+    var iconColor: Color = .orange
+    var highlighted = false
     let action: (() -> Void)?
     
     var body: some View {
@@ -551,18 +514,18 @@ struct SettingsRow: View {
         HStack(spacing: 16) {
             Image(systemName: icon)
                 .font(.system(size: 16))
-                .foregroundColor(.orange)
+                .foregroundColor(iconColor)
                 .frame(width: 24)
             
             Text(title)
                 .font(.body)
-                .foregroundColor(.white.opacity(0.9))
+                .foregroundColor(highlighted ? .yellow : .white.opacity(0.9))
             
             Spacer()
             
             Text(value)
                 .font(.subheadline)
-                .foregroundColor(.white.opacity(0.5))
+                .foregroundColor(highlighted ? .yellow.opacity(0.8) : .white.opacity(0.5))
                 .lineLimit(1)
             
             Image(systemName: "chevron.right")

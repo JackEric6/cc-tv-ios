@@ -9,14 +9,14 @@ class ApiConfig: ObservableObject {
     private static let maxRedirectCandidates = 20
     private static let rawConfigCacheTTL: TimeInterval = 20
     private static let maxRawConfigCacheEntries = 24
-    
+
     struct MultiRepoOption: Identifiable, Equatable {
         let name: String
         let url: String
-        
+
         var id: String { url.lowercased() }
     }
-    
+
     @Published var sourceBeanList: [SourceBean] = []
     @Published var homeSourceBean: SourceBean?
     @Published var parseBeanList: [ParseBean] = []
@@ -26,7 +26,11 @@ class ApiConfig: ObservableObject {
     @Published var configUrl: String = ""
     @Published var liveConfigUrl: String = ""
     @Published var wallpaper: String = ""
-    
+    @Published var danmaku: String = ""
+    private(set) var m3u8HostRules: [M3U8HostRule] = []
+
+    private(set) var isGuaziUnlocked = false
+
     private let network = NetworkManager.shared
     private var activeLoadToken = UUID()
     private var liveParseTask: Task<Void, Never>?
@@ -35,14 +39,14 @@ class ApiConfig: ObservableObject {
         let fetchedAt: Date
     }
     private var rawConfigCache: [String: RawConfigCacheEntry] = [:]
-    
+
     private init() {}
-    
+
     /// 加载远程配置
     func loadConfig(from apiUrl: String) async throws {
         try await loadConfigs(vodApiUrl: apiUrl, liveApiUrl: apiUrl)
     }
-    
+
     /// 分别加载点播配置和直播配置
     func loadConfigs(vodApiUrl: String, liveApiUrl: String) async throws {
         let trimmedVod = vodApiUrl.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -54,47 +58,101 @@ class ApiConfig: ObservableObject {
         activeLoadToken = loadToken
         liveParseTask?.cancel()
         liveParseTask = nil
-        
+
         let resolvedLive = trimmedLive.isEmpty ? trimmedVod : trimmedLive
         self.configUrl = trimmedVod
         self.liveConfigUrl = resolvedLive
-        
-        if trimmedVod == resolvedLive {
-            let configResult = try await fetchConfig(from: trimmedVod)
+
+        do {
+            if trimmedVod == resolvedLive {
+                let configResult = try await fetchConfig(from: trimmedVod)
+                guard activeLoadToken == loadToken else { return }
+                await parseConfig(
+                    configResult.config,
+                    apiUrl: configResult.loadedFrom,
+                    includeSources: true,
+                    includeLive: false,
+                    loadToken: loadToken
+                )
+                scheduleLiveParsing(
+                    config: configResult.config,
+                    apiUrl: configResult.loadedFrom,
+                    loadToken: loadToken
+                )
+            } else {
+                async let vodConfigTask = fetchConfig(from: trimmedVod)
+                async let liveConfigTask = fetchConfig(from: resolvedLive)
+                let (vodConfig, liveConfig) = try await (vodConfigTask, liveConfigTask)
+                guard activeLoadToken == loadToken else { return }
+                await parseConfig(
+                    vodConfig.config,
+                    apiUrl: vodConfig.loadedFrom,
+                    includeSources: true,
+                    includeLive: false,
+                    loadToken: loadToken
+                )
+                scheduleLiveParsing(
+                    config: liveConfig.config,
+                    apiUrl: liveConfig.loadedFrom,
+                    loadToken: loadToken
+                )
+            }
+        } catch {
+            // 默认内置源清单损坏时仍可恢复打包的站点列表。
+            guard Self.isDefaultXgzyConfig(trimmedVod),
+                  let bundledConfig = Self.loadBundledConfig(named: "xgzy_config_all") else {
+                throw error
+            }
             guard activeLoadToken == loadToken else { return }
             await parseConfig(
-                configResult.config,
-                apiUrl: configResult.loadedFrom,
+                bundledConfig,
+                apiUrl: trimmedVod,
                 includeSources: true,
                 includeLive: false,
-                loadToken: loadToken
-            )
-            scheduleLiveParsing(
-                config: configResult.config,
-                apiUrl: configResult.loadedFrom,
-                loadToken: loadToken
-            )
-        } else {
-            async let vodConfigTask = fetchConfig(from: trimmedVod)
-            async let liveConfigTask = fetchConfig(from: resolvedLive)
-            let (vodConfig, liveConfig) = try await (vodConfigTask, liveConfigTask)
-            guard activeLoadToken == loadToken else { return }
-            await parseConfig(
-                vodConfig.config,
-                apiUrl: vodConfig.loadedFrom,
-                includeSources: true,
-                includeLive: false,
-                loadToken: loadToken
-            )
-            scheduleLiveParsing(
-                config: liveConfig.config,
-                apiUrl: liveConfig.loadedFrom,
                 loadToken: loadToken
             )
         }
         guard activeLoadToken == loadToken else { return }
-        
+
         self.isLoaded = true
+    }
+
+    /// 从应用资源加载点播配置。
+    func loadBundledSources(named resourceName: String = "xgzy_config_all") throws {
+        guard let config = Self.loadBundledConfig(named: resourceName) else {
+            throw ConfigError.parseError("找不到打包源配置: \(resourceName).json")
+        }
+        let token = UUID()
+        activeLoadToken = token
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.parseConfig(
+                config,
+                apiUrl: self.configUrl,
+                includeSources: true,
+                includeLive: false,
+                loadToken: token
+            )
+            self.isLoaded = true
+        }
+    }
+
+    private static func isDefaultXgzyConfig(_ url: String) -> Bool {
+        let normalized = url.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized == "bundle://xgzy_config_all.json"
+            || normalized.contains("movie2_kktvs")
+            || normalized.contains("movie2_xgzy")
+            || normalized.contains("xgzy-config")
+    }
+
+    private static func loadBundledConfig(named resourceName: String) -> AppConfigData? {
+        guard let url = Bundle.main.url(forResource: resourceName, withExtension: "json"),
+              let data = try? Data(contentsOf: url),
+              let config = try? JSONDecoder().decode(AppConfigData.self, from: data),
+              config.hasUsableContent else {
+            return nil
+        }
+        return config
     }
 
     /// 直播分组改为后台解析，避免阻塞首页首屏进入。
@@ -110,15 +168,24 @@ class ApiConfig: ObservableObject {
             )
         }
     }
-    
+
     private func fetchConfig(from apiUrl: String) async throws -> (config: AppConfigData, loadedFrom: String) {
-        try await fetchConfig(
+        let trimmed = apiUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.lowercased().hasPrefix("bundle://") {
+            let resourceName = String(trimmed.dropFirst("bundle://".count))
+                .replacingOccurrences(of: ".json", with: "", options: [.caseInsensitive])
+            guard let config = Self.loadBundledConfig(named: resourceName) else {
+                throw ConfigError.parseError("找不到应用内配置: \(resourceName).json")
+            }
+            return (config, trimmed)
+        }
+        return try await fetchConfig(
             from: apiUrl,
             visitedUrls: Set<String>(),
             depth: 0
         )
     }
-    
+
     private func fetchConfig(
         from apiUrl: String,
         visitedUrls: Set<String>,
@@ -127,40 +194,40 @@ class ApiConfig: ObservableObject {
         guard depth <= Self.maxConfigResolveDepth else {
             throw ConfigError.parseError("配置跳转层级过深（超过 \(Self.maxConfigResolveDepth) 层）")
         }
-        
+
         let normalizedUrl = Self.normalizeConfigUrl(apiUrl)
         guard !normalizedUrl.isEmpty else {
             throw ConfigError.parseError("配置地址为空")
         }
-        
+
         let visitKey = normalizedUrl.lowercased()
         guard !visitedUrls.contains(visitKey) else {
             throw ConfigError.parseError("检测到循环引用的配置地址: \(normalizedUrl)")
         }
-        
+
         var nextVisited = visitedUrls
         nextVisited.insert(visitKey)
-        
+
         let jsonStr = try await fetchConfigText(from: normalizedUrl)
-        
+
         // 清理非标准 JSON（Android 端 Gson 默认支持注释，Swift 需要手动处理）
         let cleanedJson = Self.stripJsonComments(jsonStr)
-        
+
         guard let data = cleanedJson.data(using: .utf8) else {
             throw ConfigError.parseError("无法解析配置数据")
         }
-        
+
         let decoder = JSONDecoder()
         let decodedConfig = try? decoder.decode(AppConfigData.self, from: data)
         if let config = decodedConfig, config.hasUsableContent {
             return (config, normalizedUrl)
         }
-        
+
         if let multiRepo = try? decoder.decode(MultiRepoConfigData.self, from: data) {
             let candidateUrls = Self.uniqueUrlsInOrder(
                 multiRepo.candidateUrls.map(Self.normalizeConfigUrl)
             )
-            
+
             var lastError: Error?
             for candidateUrl in candidateUrls {
                 do {
@@ -173,16 +240,16 @@ class ApiConfig: ObservableObject {
                     lastError = error
                 }
             }
-            
+
             if let lastError {
                 throw ConfigError.parseError("多仓库配置中没有可用地址，最后错误: \(lastError.localizedDescription)")
             }
             throw ConfigError.parseError("多仓库配置中没有可用地址")
         }
-        
+
         let redirectCandidates = Self.extractConfigRedirectCandidates(from: cleanedJson)
             .filter { $0.lowercased() != visitKey && !nextVisited.contains($0.lowercased()) }
-        
+
         if !redirectCandidates.isEmpty {
             var lastError: Error?
             for candidate in redirectCandidates {
@@ -196,37 +263,37 @@ class ApiConfig: ObservableObject {
                     lastError = error
                 }
             }
-            
+
             if let lastError {
                 throw ConfigError.parseError("页面跳转配置解析失败，最后错误: \(lastError.localizedDescription)")
             }
         }
-        
+
         if decodedConfig != nil {
             throw ConfigError.parseError("配置缺少可用站点（sites / lives / parses）")
         }
-        
+
         throw ConfigError.parseError("配置格式不受支持")
     }
-    
+
     /// 读取配置文本并做短时缓存，避免“多仓探测 + 正式加载”重复请求同一地址。
     private func fetchConfigText(from normalizedUrl: String) async throws -> String {
         let key = normalizedUrl.lowercased()
         let now = Date()
-        
+
         if let entry = rawConfigCache[key] {
             if now.timeIntervalSince(entry.fetchedAt) <= Self.rawConfigCacheTTL {
                 return entry.content
             }
             rawConfigCache.removeValue(forKey: key)
         }
-        
+
         let content = try await network.getString(from: normalizedUrl)
         rawConfigCache[key] = RawConfigCacheEntry(content: content, fetchedAt: now)
         trimRawConfigCacheIfNeeded()
         return content
     }
-    
+
     private func trimRawConfigCacheIfNeeded() {
         guard rawConfigCache.count > Self.maxRawConfigCacheEntries else { return }
         let overflow = rawConfigCache.count - Self.maxRawConfigCacheEntries
@@ -236,11 +303,11 @@ class ApiConfig: ObservableObject {
             .map(\.key)
         staleKeys.forEach { rawConfigCache.removeValue(forKey: $0) }
     }
-    
+
     private static func uniqueUrlsInOrder(_ urls: [String]) -> [String] {
         var seen: Set<String> = []
         var result: [String] = []
-        
+
         for url in urls {
             let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
@@ -249,10 +316,10 @@ class ApiConfig: ObservableObject {
             seen.insert(key)
             result.append(trimmed)
         }
-        
+
         return result
     }
-    
+
     /// 从网页/文本中提取可能的配置地址：
     /// - 明文 URL 文本
     /// - data-clipboard-text（常见导航页“点击复制”）
@@ -260,11 +327,11 @@ class ApiConfig: ObservableObject {
     private static func extractConfigRedirectCandidates(from content: String) -> [String] {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         var rawCandidates: [String] = []
-        
+
         if (trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")) && !trimmed.contains("\n") {
             rawCandidates.append(trimmed)
         }
-        
+
         rawCandidates.append(contentsOf: matchCaptureGroup(
             pattern: #"data-clipboard-text\s*=\s*["']([^"']+)["']"#,
             in: content
@@ -277,25 +344,25 @@ class ApiConfig: ObservableObject {
             pattern: #"(https?://[^\s"'<>\\]+)"#,
             in: content
         ))
-        
+
         let normalized = rawCandidates
             .map(sanitizeExtractedUrl)
             .map(normalizeConfigUrl)
             .filter { !$0.isEmpty }
             .filter(isLikelyConfigPointerUrl)
             .filter { !isLikelyBinaryAssetUrl($0) }
-        
+
         return Array(uniqueUrlsInOrder(normalized).prefix(maxRedirectCandidates))
     }
-    
+
     private static func matchCaptureGroup(pattern: String, in content: String) -> [String] {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
             return []
         }
-        
+
         let range = NSRange(content.startIndex..<content.endIndex, in: content)
         let matches = regex.matches(in: content, options: [], range: range)
-        
+
         return matches.compactMap { match in
             guard match.numberOfRanges >= 2,
                   let subRange = Range(match.range(at: 1), in: content) else {
@@ -304,22 +371,22 @@ class ApiConfig: ObservableObject {
             return String(content[subRange])
         }
     }
-    
+
     private static func sanitizeExtractedUrl(_ value: String) -> String {
         var result = value.trimmingCharacters(in: .whitespacesAndNewlines)
         result = result.replacingOccurrences(of: "&amp;", with: "&")
         result = result.replacingOccurrences(of: "\\/", with: "/")
-        
+
         while let last = result.last, [".", ",", ";", ")", "]", "}", "\"", "'"].contains(last) {
             result.removeLast()
         }
         while let first = result.first, ["\"", "'", "(", "[", "{"].contains(first) {
             result.removeFirst()
         }
-        
+
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    
+
     private static func isLikelyBinaryAssetUrl(_ urlString: String) -> Bool {
         guard let components = URLComponents(string: urlString) else { return false }
         let path = components.path.lowercased()
@@ -335,18 +402,18 @@ class ApiConfig: ObservableObject {
             || path.hasSuffix(".woff2")
             || path.hasSuffix(".ttf")
     }
-    
+
     private static func isLikelyConfigPointerUrl(_ urlString: String) -> Bool {
         guard let components = URLComponents(string: urlString) else { return false }
-        
+
         let host = (components.host ?? "").lowercased()
         let path = components.path.lowercased()
         let query = (components.percentEncodedQuery ?? "").lowercased()
-        
+
         if host.contains("raw.githubusercontent.com") || host.contains("githubusercontent.com") {
             return true
         }
-        
+
         if path.contains(".json")
             || path.hasSuffix("/tv")
             || path.hasSuffix("/tv/")
@@ -359,10 +426,10 @@ class ApiConfig: ObservableObject {
             || query.contains("url=") {
             return true
         }
-        
+
         return false
     }
-    
+
     /// 统一规范配置 URL：
     /// 1) 修正 https:/xxx 之类的单斜杠写法；
     /// 2) 将 github.com/.../blob/... 转为 raw.githubusercontent.com/...；
@@ -370,20 +437,20 @@ class ApiConfig: ObservableObject {
     static func normalizeConfigUrl(_ rawUrl: String) -> String {
         let trimmed = rawUrl.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return trimmed }
-        
+
         let fixedScheme = fixMalformedSchemeIfNeeded(trimmed)
-        
+
         if let normalizedProxy = normalizeGhProxyWrappedUrl(fixedScheme) {
             return normalizedProxy
         }
-        
+
         if let githubRaw = convertGitHubBlobUrlToRaw(fixedScheme) {
             return githubRaw
         }
-        
+
         return fixedScheme
     }
-    
+
     private static func fixMalformedSchemeIfNeeded(_ urlString: String) -> String {
         let fixedHttps = urlString.replacingOccurrences(
             of: #"^https:/(?!/)"#,
@@ -396,27 +463,27 @@ class ApiConfig: ObservableObject {
             options: .regularExpression
         )
     }
-    
+
     private static func normalizeGhProxyWrappedUrl(_ urlString: String) -> String? {
         guard let components = URLComponents(string: urlString),
               let host = components.host?.lowercased(),
               host.contains("gh-proxy") else {
             return nil
         }
-        
+
         let path = components.percentEncodedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard !path.isEmpty else { return nil }
-        
+
         let decodedPath = path.removingPercentEncoding ?? path
         let fixedEmbedded = fixMalformedSchemeIfNeeded(decodedPath)
         guard fixedEmbedded.hasPrefix("http://") || fixedEmbedded.hasPrefix("https://") else {
             return nil
         }
-        
+
         let normalizedEmbedded = convertGitHubBlobUrlToRaw(fixedEmbedded) ?? fixedEmbedded
         let scheme = components.scheme ?? "https"
         let portSuffix = components.port.map { ":\($0)" } ?? ""
-        
+
         var rebuilt = "\(scheme)://\(host)\(portSuffix)/\(normalizedEmbedded)"
         if let query = components.percentEncodedQuery, !query.isEmpty {
             rebuilt += "?\(query)"
@@ -426,19 +493,19 @@ class ApiConfig: ObservableObject {
         }
         return rebuilt
     }
-    
+
     private static func convertGitHubBlobUrlToRaw(_ urlString: String) -> String? {
         guard let components = URLComponents(string: urlString),
               let host = components.host?.lowercased(),
               host == "github.com" || host == "www.github.com" else {
             return nil
         }
-        
+
         let parts = components.path.split(separator: "/", omittingEmptySubsequences: true)
         guard parts.count >= 5, parts[2] == "blob" else {
             return nil
         }
-        
+
         let owner = String(parts[0])
         let repo = String(parts[1])
         let branch = String(parts[3])
@@ -446,7 +513,7 @@ class ApiConfig: ObservableObject {
         guard !filePath.isEmpty else {
             return nil
         }
-        
+
         var rawUrl = "https://raw.githubusercontent.com/\(owner)/\(repo)/\(branch)/\(filePath)"
         if let query = components.percentEncodedQuery, !query.isEmpty {
             rawUrl += "?\(query)"
@@ -456,13 +523,13 @@ class ApiConfig: ObservableObject {
         }
         return rawUrl
     }
-    
+
     /// 去除 JSON 中的 // 行注释，兼容 TVBox 配置文件格式
     /// Android 端 Gson 原生支持注释，Swift 的 JSONDecoder 不支持
     static func stripJsonComments(_ json: String) -> String {
         let lines = json.components(separatedBy: "\n")
         var result: [String] = []
-        
+
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             // 跳过纯注释行（以 // 开头）
@@ -473,9 +540,9 @@ class ApiConfig: ObservableObject {
             let cleaned = removeInlineComment(from: line)
             result.append(cleaned)
         }
-        
+
         var joined = result.joined(separator: "\n")
-        
+
         // 修复尾部逗号问题：,] 或 ,} （注释行被删除后可能产生）
         // 使用正则替换 , 后面跟着空白和 ] 或 } 的情况
         joined = joined.replacingOccurrences(
@@ -483,16 +550,16 @@ class ApiConfig: ObservableObject {
             with: "$1",
             options: .regularExpression
         )
-        
+
         return joined
     }
-    
+
     /// 移除行内注释（只处理不在字符串内的 //）
     private static func removeInlineComment(from line: String) -> String {
         var inString = false
         var escape = false
         let chars = Array(line)
-        
+
         for i in 0..<chars.count {
             let c = chars[i]
             if escape {
@@ -516,31 +583,31 @@ class ApiConfig: ObservableObject {
         }
         return line
     }
-    
+
     /// 仅探测“多仓库入口”并返回可选项。
     /// 返回 nil 表示不是多仓库入口；返回数组表示是多仓库入口（数组可能为空）。
     func fetchMultiRepoOptions(from apiUrl: String) async throws -> [MultiRepoOption]? {
         let normalizedUrl = Self.normalizeConfigUrl(apiUrl)
         let jsonStr = try await fetchConfigText(from: normalizedUrl)
         let cleanedJson = Self.stripJsonComments(jsonStr)
-        
+
         guard let data = cleanedJson.data(using: .utf8) else {
             throw ConfigError.parseError("无法解析配置数据")
         }
-        
+
         let decoder = JSONDecoder()
         if let config = try? decoder.decode(AppConfigData.self, from: data), config.hasUsableContent {
             return nil
         }
-        
+
         guard let multiRepo = try? decoder.decode(MultiRepoConfigData.self, from: data) else {
             return nil
         }
-        
+
         let normalizedCandidates = Self.uniqueUrlsInOrder(
             multiRepo.candidateUrls.map(Self.normalizeConfigUrl)
         )
-        
+
         var options: [MultiRepoOption] = []
         for candidate in normalizedCandidates {
             let matchedEntry = multiRepo.urls?.first(where: {
@@ -561,11 +628,40 @@ class ApiConfig: ObservableObject {
                 )
             )
         }
-        
+
         return options
     }
-    
+
     /// 解析配置数据
+    private func makeSourceBean(from site: AppConfigData.SiteConfig) -> SourceBean {
+        let sourceKey = site.key ?? UUID().uuidString
+        let sourceName = sourceKey.caseInsensitiveCompare("guazi") == .orderedSame
+            ? "瓜子"
+            : (site.name ?? "未命名")
+        return SourceBean(
+            key: sourceKey,
+            name: sourceName,
+            api: KktvsResponseNormalizer.normalizeSourceAPI(
+                site.api ?? "",
+                sourceKey: sourceKey
+            ),
+            searchable: site.searchable?.value ?? 1,
+            filterable: site.filterable?.value ?? 1,
+            quickSearch: site.quickSearch?.value ?? 0,
+            playerType: site.playerType?.value ?? 0,
+            type: site.type?.value ?? 1,
+            ext: site.ext?.stringValue,
+            timeout: site.timeout?.value,
+            headers: site.headers?.compactMapValues(\.stringValue),
+            icon: site.icon,
+            changeable: site.changeable?.value ?? 1,
+            hidden: site.hidden ?? false,
+            disabled: site.disabled ?? false,
+            backupApi: site.backupApi ?? [],
+            backupDomain: site.backupDomain ?? []
+        )
+    }
+
     private func parseConfig(
         _ config: AppConfigData,
         apiUrl: String,
@@ -574,40 +670,77 @@ class ApiConfig: ObservableObject {
         loadToken: UUID
     ) async {
         guard activeLoadToken == loadToken else { return }
-        
+
         if includeSources {
             // 解析站点列表
-            var sources: [SourceBean] = []
-            if let sites = config.sites {
-                for site in sites {
-                    let bean = SourceBean(
-                        key: site.key ?? UUID().uuidString,
-                        name: site.name ?? "未命名",
-                        api: KktvsResponseNormalizer.normalizeSourceAPI(
-                            site.api ?? "",
-                            sourceKey: site.key ?? ""
-                        ),
-                        searchable: site.searchable?.value ?? 1,
-                        filterable: site.filterable?.value ?? 1,
-                        quickSearch: site.quickSearch?.value ?? 0,
-                        playerType: site.playerType?.value ?? 0,
-                        type: site.type?.value ?? 1,
-                        ext: site.ext?.stringValue
-                    )
-                    sources.append(bean)
+            var sources = (config.sites ?? [])
+                .filter { $0.key?.caseInsensitiveCompare("yutu") != .orderedSame }
+                .map { self.makeSourceBean(from: $0) }
+            // 瓜子使用 iOS 专用加密服务。远程配置中的同名条目可能是旧的
+            // JAR/隐藏定义，必须由内置 iOS 定义覆盖，才能进入聚合搜索。
+            if let bundledConfig = Self.loadBundledConfig(named: "xgzy_config_all"),
+               let guaziSite = bundledConfig.sites?.first(where: { $0.key == "guazi" }) {
+                sources.removeAll { $0.key.caseInsensitiveCompare("guazi") == .orderedSame }
+                sources.append(self.makeSourceBean(from: guaziSite))
+            }
+            if let bundledSites = Self.loadBundledConfig(named: "xgzy_config_all")?.sites {
+                let migratedKeys: Set<String> = ["jianpian", "ffzy", "fhw88", "cz4k", "fan_moli", "ikanbot", "zanpian"]
+                for site in bundledSites {
+                    guard let key = site.key?.lowercased(), migratedKeys.contains(key) else { continue }
+                    let source = self.makeSourceBean(from: site)
+                    if let index = sources.firstIndex(where: { $0.key.caseInsensitiveCompare(key) == .orderedSame }) {
+                        sources[index] = source
+                    } else {
+                        sources.append(source)
+                    }
                 }
             }
-            self.sourceBeanList = sources
-            
-            // 设置默认主页源：优先选择 Swift 支持的源
-            if let saved = UserDefaults.standard.string(forKey: HawkConfig.HOME_API),
-               let found = sources.first(where: { $0.key == saved }) {
-                self.homeSourceBean = found
-            } else {
-                // 优先选择支持的源（type 0/1/4），跳过 type=3 (JAR)
-                self.homeSourceBean = sources.first(where: { $0.isSupportedInSwift }) ?? sources.first
+            // 远程配置偶发返回只有 lives/parses 的内容时，不能清空已经可用的视频源。
+            // 首次启动也保留打包源清单，确保默认瓜子主页可进入。
+            if !sources.isEmpty {
+                self.sourceBeanList = sources
+            } else if self.sourceBeanList.isEmpty,
+                      let bundled = Self.loadBundledConfig(named: "xgzy_config_all"),
+                      let bundledSites = bundled.sites {
+                let bundledSources = bundledSites
+                    .filter { $0.key?.caseInsensitiveCompare("yutu") != .orderedSame }
+                    .map { self.makeSourceBean(from: $0) }
+                if !bundledSources.isEmpty {
+                    self.sourceBeanList = bundledSources
+                }
             }
-            
+
+            if !self.sourceBeanList.isEmpty {
+                // 保留已选择的首页源；没有有效选择时按瓜子、西瓜、荐片顺序初始化。
+                let storedHomeKey = UserDefaults.standard.string(forKey: HawkConfig.HOME_API)
+                let savedHomeKey = HomeSourceSelectionPolicy.startupKey(savedKey: storedHomeKey)
+                if savedHomeKey != storedHomeKey, let savedHomeKey {
+                    UserDefaults.standard.set(savedHomeKey, forKey: HawkConfig.HOME_API)
+                }
+                let selectedKey = self.homeSourceBean?.key ?? savedHomeKey
+                if let selectedKey,
+                   let selectedSource = self.sourceBeanList.first(where: {
+                       $0.key.caseInsensitiveCompare(selectedKey) == .orderedSame && $0.isSelectable
+                   }) {
+                    self.homeSourceBean = selectedSource
+                } else {
+                    // 瓜子为默认首页；西瓜和荐片按顺序作为失败回退源。
+                    let guazi = self.sourceBeanList.first(where: {
+                        $0.key.caseInsensitiveCompare("guazi") == .orderedSame && $0.isSelectable
+                    })
+                    let xigua = self.sourceBeanList.first(where: { $0.key == "xgzy" && $0.isSelectable })
+                    let jianpian = self.sourceBeanList.first(where: {
+                        $0.key.caseInsensitiveCompare("jianpian") == .orderedSame && $0.isSelectable
+                    })
+                        ?? self.sourceBeanList.first(where: { $0.isSelectable })
+                        ?? self.sourceBeanList.first
+                    self.homeSourceBean = guazi ?? xigua ?? jianpian
+                    if let defaultSource = self.homeSourceBean {
+                        UserDefaults.standard.set(defaultSource.key, forKey: HawkConfig.HOME_API)
+                    }
+                }
+            }
+
             // 解析解析器列表
             if let parses = config.parses {
                 self.parseBeanList = parses.map { p in
@@ -616,7 +749,7 @@ class ApiConfig: ObservableObject {
             } else {
                 self.parseBeanList = []
             }
-            
+
             // 解析 DoH 列表
             if let dohs = config.doh {
                 self.dohList = dohs.compactMap { d in
@@ -626,11 +759,23 @@ class ApiConfig: ObservableObject {
             } else {
                 self.dohList = []
             }
-            
+
             // 壁纸
             self.wallpaper = config.wallpaper ?? ""
+            self.danmaku = config.danmaku?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            self.m3u8HostRules = (config.rules ?? []).compactMap { rule in
+                let hosts = (rule.hosts ?? []) + [rule.host ?? ""]
+                let normalizedHosts = hosts
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                let patterns = (rule.regex ?? []).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                guard !normalizedHosts.isEmpty, !patterns.isEmpty else { return nil }
+                return M3U8HostRule(hosts: normalizedHosts, regex: patterns)
+            }
+            await M3U8Purifier.shared.updateHostRules(m3u8HostRules)
+            guard activeLoadToken == loadToken else { return }
         }
-        
+
         if includeLive {
             if let lives = config.lives {
                 let parsedGroups = await parseLives(lives, apiUrl: apiUrl, loadToken: loadToken)
@@ -641,7 +786,7 @@ class ApiConfig: ObservableObject {
             }
         }
     }
-    
+
     /// 解析直播列表
     private func parseLives(
         _ lives: [AppConfigData.LiveConfig],
@@ -650,23 +795,23 @@ class ApiConfig: ObservableObject {
     ) async -> [LiveChannelGroup] {
         var mergedGroups: [String: LiveChannelGroup] = [:]
         var remoteLiveTargets: [(order: Int, url: String)] = []
-        
+
         for (index, live) in lives.enumerated() {
             guard activeLoadToken == loadToken else { return [] }
-            
+
             // 如果有 url，从远程加载
             if let liveUrl = live.url, !liveUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let resolvedUrl = resolveLiveUrl(liveUrl, baseConfigUrl: apiUrl)
                 remoteLiveTargets.append((order: index, url: resolvedUrl))
             }
-            
+
             // 如果有内嵌频道
             if let channels = live.channels {
                 let inlineGroups = parseInlineLiveChannels(channels)
                 mergeLiveGroups(inlineGroups, into: &mergedGroups)
             }
         }
-        
+
         if !remoteLiveTargets.isEmpty {
             let fetchedContents = await withTaskGroup(
                 of: (Int, String?).self,
@@ -683,7 +828,7 @@ class ApiConfig: ObservableObject {
                         }
                     }
                 }
-                
+
                 var results: [(Int, String)] = []
                 for await (order, content) in group {
                     if let content {
@@ -692,7 +837,7 @@ class ApiConfig: ObservableObject {
                 }
                 return results
             }
-            
+
             for (_, content) in fetchedContents.sorted(by: { $0.0 < $1.0 }) {
                 guard activeLoadToken == loadToken else { return [] }
                 let groups = parseLiveContent(content)
@@ -700,24 +845,24 @@ class ApiConfig: ObservableObject {
                 liveChannelGroupList = sortedGroups(from: mergedGroups)
             }
         }
-        
+
         return sortedGroups(from: mergedGroups)
     }
-    
+
     /// 解析 m3u / txt 格式的直播内容
     private func parseLiveContent(_ content: String) -> [LiveChannelGroup] {
         var groups: [String: LiveChannelGroup] = [:]
         var currentGroupName = "默认"
-        
+
         let lines = content.components(separatedBy: .newlines)
         let firstNonEmptyLine = lines.first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         let isM3U = firstNonEmptyLine?.uppercased().hasPrefix("#EXTM3U") == true
-        
+
         // 检测是否为 M3U 格式
         if isM3U {
             var currentName = ""
             var currentGroup = "默认"
-            
+
             for line in lines {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 if trimmed.hasPrefix("#EXTINF:") {
@@ -750,7 +895,7 @@ class ApiConfig: ObservableObject {
             for line in lines {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 guard !trimmed.isEmpty else { continue }
-                
+
                 if trimmed.hasSuffix(",#genre#") || trimmed.hasSuffix("，#genre#") {
                     currentGroupName = trimmed
                         .replacingOccurrences(of: ",#genre#", with: "")
@@ -758,12 +903,12 @@ class ApiConfig: ObservableObject {
                         .trimmingCharacters(in: .whitespaces)
                     continue
                 }
-                
+
                 let parts = trimmed.components(separatedBy: ",")
                 if parts.count >= 2 {
                     let name = parts[0].trimmingCharacters(in: .whitespaces)
                     let url = parts[1...].joined(separator: ",").trimmingCharacters(in: .whitespaces)
-                    
+
                     if !name.isEmpty && Self.isLiveStreamUrl(url) {
                         appendChannel(
                             named: name,
@@ -776,10 +921,10 @@ class ApiConfig: ObservableObject {
                 }
             }
         }
-        
+
         return sortedGroups(from: groups)
     }
-    
+
     private func parseInlineLiveChannels(_ channels: [AppConfigData.LiveConfig.LiveChannelConfig]) -> [LiveChannelGroup] {
         var groups: [String: LiveChannelGroup] = [:]
         for channel in channels {
@@ -793,7 +938,7 @@ class ApiConfig: ObservableObject {
         }
         return sortedGroups(from: groups)
     }
-    
+
     private func mergeLiveGroups(_ incomingGroups: [LiveChannelGroup], into groups: inout [String: LiveChannelGroup]) {
         for group in incomingGroups {
             for channel in group.channels {
@@ -807,7 +952,7 @@ class ApiConfig: ObservableObject {
             }
         }
     }
-    
+
     private func appendChannel(
         named channelName: String,
         urls: [String],
@@ -817,10 +962,10 @@ class ApiConfig: ObservableObject {
     ) {
         let normalizedName = Self.normalizeChannelName(channelName)
         guard !normalizedName.isEmpty else { return }
-        
+
         let validUrls = Self.uniqueLiveUrls(urls)
         guard !validUrls.isEmpty else { return }
-        
+
         let normalizedGroupName = Self.normalizeGroupName(groupName)
         if groups[normalizedGroupName] == nil {
             groups[normalizedGroupName] = LiveChannelGroup(
@@ -828,9 +973,9 @@ class ApiConfig: ObservableObject {
                 groupIndex: groups.count
             )
         }
-        
+
         guard var group = groups[normalizedGroupName] else { return }
-        
+
         if let existingIndex = group.channels.firstIndex(where: {
             Self.normalizeChannelName($0.channelName) == normalizedName
         }) {
@@ -854,10 +999,10 @@ class ApiConfig: ObservableObject {
             item.logo = logo.trimmingCharacters(in: .whitespacesAndNewlines)
             group.channels.append(item)
         }
-        
+
         groups[normalizedGroupName] = group
     }
-    
+
     private func sortedGroups(from groups: [String: LiveChannelGroup]) -> [LiveChannelGroup] {
         groups.values
             .sorted { $0.groupIndex < $1.groupIndex }
@@ -871,7 +1016,7 @@ class ApiConfig: ObservableObject {
                 return reindexedGroup
             }
     }
-    
+
     private func resolveLiveUrl(_ urlString: String, baseConfigUrl: String) -> String {
         let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return trimmed }
@@ -884,34 +1029,34 @@ class ApiConfig: ObservableObject {
         }
         return Self.normalizeConfigUrl(resolved.absoluteString)
     }
-    
+
     private static func uniqueLiveUrls(_ urls: [String]) -> [String] {
         var result: [String] = []
         var seen: Set<String> = []
-        
+
         for url in urls {
             let normalized = normalizeLiveUrl(url)
             guard !normalized.isEmpty, isLiveStreamUrl(normalized), !seen.contains(normalized) else { continue }
             seen.insert(normalized)
             result.append(normalized)
         }
-        
+
         return result
     }
-    
+
     private static func normalizeGroupName(_ groupName: String) -> String {
         let trimmed = groupName.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "默认" : trimmed
     }
-    
+
     private static func normalizeChannelName(_ channelName: String) -> String {
         channelName.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    
+
     private static func normalizeLiveUrl(_ url: String) -> String {
         url.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    
+
     private static func isLiveStreamUrl(_ url: String) -> Bool {
         let lowercased = url.lowercased()
         return lowercased.hasPrefix("http://")
@@ -919,28 +1064,82 @@ class ApiConfig: ObservableObject {
             || lowercased.hasPrefix("rtmp://")
             || lowercased.hasPrefix("rtsp://")
     }
-    
+
     /// 获取指定 key 的源
     func getSource(key: String) -> SourceBean? {
-        sourceBeanList.first(where: { $0.key == key })
+        let normalizedKey = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalizedKey.isEmpty else { return nil }
+        return sourceBeanList.first {
+            $0.key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedKey
+        }
     }
-    
+
     /// 获取可搜索的源列表
     func getSearchableSources() -> [SourceBean] {
-        sourceBeanList.filter { $0.isSearchable }
+        ensureBundledGuaziSource()
+        return sourceBeanList.filter { $0.isSearchable && $0.isSelectable }
     }
-    
+
+    /// 搜索可能早于远程配置加载完成；确保瓜子始终使用 iOS 专用实现。
+    /// 远程配置中的同名条目可能是隐藏源或 JAR 源，不能直接复用。
+    private func ensureBundledGuaziSource() {
+        let hasValidGuazi = sourceBeanList.contains {
+            $0.key.caseInsensitiveCompare("guazi") == .orderedSame
+                && $0.type == 1
+                && $0.searchable == 1
+                && !$0.hidden
+                && !$0.disabled
+                && $0.isHttpApi
+        }
+        guard !hasValidGuazi else { return }
+
+        let guazi: SourceBean
+        if let config = Self.loadBundledConfig(named: "xgzy_config_all"),
+           let site = config.sites?.first(where: { $0.key?.caseInsensitiveCompare("guazi") == .orderedSame }) {
+            guazi = makeSourceBean(from: site)
+        } else {
+            // 资源文件缺失时仍保留搜索入口；瓜子请求由 GuaziService 接管 API。
+            guazi = SourceBean(
+                key: "guazi",
+                name: "瓜子",
+                api: "https://api.anctjd.com",
+                searchable: 1,
+                filterable: 0,
+                quickSearch: 1,
+                type: 1
+            )
+        }
+
+        sourceBeanList.removeAll { $0.key.caseInsensitiveCompare("guazi") == .orderedSame }
+        sourceBeanList.append(guazi)
+    }
+
     /// 设置主页源
     func setHomeSource(_ source: SourceBean) {
         self.homeSourceBean = source
         UserDefaults.standard.set(source.key, forKey: HawkConfig.HOME_API)
     }
+
+    @discardableResult
+    func unlockGuaziSource() -> Bool {
+        isGuaziUnlocked = true
+        ensureBundledGuaziSource()
+        guard let source = sourceBeanList.first(where: {
+            $0.key.caseInsensitiveCompare("guazi") == .orderedSame && $0.isSelectable
+        }) else {
+            isGuaziUnlocked = false
+            return false
+        }
+        homeSourceBean = source
+        return true
+    }
+
 }
 
 enum ConfigError: LocalizedError {
     case parseError(String)
     case networkError(String)
-    
+
     var errorDescription: String? {
         switch self {
         case .parseError(let msg): return "配置解析错误: \(msg)"

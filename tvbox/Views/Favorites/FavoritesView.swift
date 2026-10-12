@@ -12,7 +12,7 @@ struct FavoritesView: View {
     #if os(iOS)
     /// iOS 下卡片尺寸更紧凑，适配手机竖屏。
     private let columns = [
-        GridItem(.adaptive(minimum: 120, maximum: 160), spacing: 12)
+        GridItem(.adaptive(minimum: 100, maximum: 132), spacing: 10)
     ]
     #else
     /// macOS 下卡片适度放大，提升桌面端可读性。
@@ -34,7 +34,7 @@ struct FavoritesView: View {
                 emptyState
             } else {
                 ScrollView {
-                    LazyVGrid(columns: columns, spacing: 16) {
+                    LazyVGrid(columns: columns, spacing: 12) {
                         // 每个收藏项都可直接跳转详情，并支持右键取消收藏。
                         ForEach(favorites) { item in
                             NavigationLink(destination: DetailView(video: movieVideo(from: item))) {
@@ -55,7 +55,7 @@ struct FavoritesView: View {
                             }
                         }
                     }
-                    .padding(.horizontal, 20)
+                    .padding(.horizontal, 16)
                     .padding(.vertical, 12)
                 }
             }
@@ -81,7 +81,7 @@ struct FavoritesView: View {
     /// 只展示海报与标题，保持网格信息密度一致。
     private func favoriteCard(_ item: VodCollect) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            CachedAsyncImage(url: URL.posterURL(from: item.vodPic)) { image in
+            CachedAsyncImage(url: URL.posterURL(from: displayPoster(for: item))) { image in
                 image.resizable().aspectRatio(2/3, contentMode: .fill)
             } placeholder: {
                 Rectangle().fill(Color.gray.opacity(0.3))
@@ -99,6 +99,19 @@ struct FavoritesView: View {
     
     /// 将收藏记录映射成详情页可识别的视频对象。
     private func movieVideo(from item: VodCollect) -> Movie.Video {
-        Movie.Video(id: item.vodId, name: item.vodName, pic: item.vodPic, sourceKey: item.sourceKey)
+        Movie.Video(id: item.vodId, name: item.vodName, pic: displayPoster(for: item), sourceKey: item.sourceKey)
+    }
+
+    /// 收藏记录可能保存了某个资源站的失效海报；同名搜索结果已有正常海报时优先复用。
+    private func displayPoster(for item: VodCollect) -> String {
+        if !PosterCache.isGuaziSource(item.sourceKey) {
+            if let cached = PosterCache.cachedPoster(for: item.vodName, sourceKey: item.sourceKey) {
+                return cached
+            }
+            if PosterCache.isLikelyBroken(item.vodPic, sourceKey: item.sourceKey) {
+                return ""
+            }
+        }
+        return item.vodPic
     }
 }

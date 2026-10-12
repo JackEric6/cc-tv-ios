@@ -5,11 +5,11 @@ import Combine
 /// 首页 ViewModel
 @MainActor
 class HomeViewModel: ObservableObject {
-    /// 分类列表（包含手动注入的"推荐"分类）。
+    /// 首页可见的子分类列表。
     @Published var sorts: [MovieSort.SortData] = []
     /// 当前选中的分类。
     @Published var selectedSort: MovieSort.SortData?
-    /// 首页推荐内容（对应"推荐"分类）。
+    /// 首页推荐内容（用于首页内容兜底，不作为分类标签展示）。
     @Published var homeVideos: [Movie.Video] = []
     /// 普通分类的视频列表（分页加载）。
     @Published var categoryVideos: [Movie.Video] = []
@@ -24,40 +24,345 @@ class HomeViewModel: ObservableObject {
     
     /// 源数据访问服务。
     private let sourceService = SourceService.shared
+    private let trendingService = DoubanTrendingService.shared
     /// 标记上次加载是否因网络错误失败（用于网络恢复自动重试）。
     private var lastLoadFailedDueToNetwork = false
     private var networkRestoredCancellable: AnyCancellable?
+    /// 防止较早的刷新请求在较新的请求之后回写页面状态。
+    private var loadGeneration = 0
+    private var refreshGeneration = 0
+    /// 同一时间只允许一个分类列表请求和一个刷新流程进入，避免页面生命周期事件重复拉取。
+    private var sortsLoadInFlight = false
+    private var refreshInFlight = false
+    private var recommendationTask: Task<Void, Never>?
+    private var loadingOperationCount = 0
+    private var categoryRequestsInFlight = Set<String>()
+    private var lastHomeAppearanceReload = Date.distantPast
+    private var homeAppearanceTask: Task<Void, Never>?
+    /// 冷启动分类请求失败时静默重试，避免把短暂网络抖动显示成首页错误页。
+    private var initialLoadRetryTask: Task<Void, Never>?
+    private var initialLoadRetryToken: UUID?
+    private var isWaitingForInitialRetry = false
+    private var initialLoadRetryAttempt = 0
+    /// 瓜子首屏无内容时临时使用命中的备用源；配置中的首选源仍保留为瓜子，刷新可重试。
+    private var fallbackPreferredSourceKey: String?
+    private var fallbackHomeSourceKey: String?
+    private let scrollPositionStoragePrefix = "congcong.home.scroll-position."
+    /// 仅用户点击标签后才置为 true；渐进加载和冷启动补选不能阻止最终首项收敛。
+    private var hasUserSelectedSort = false
+    /// 当前 ViewModel 的首次完整分类结果是否已经落地。
+    ///
+    /// 冷启动可在固定优先片单到达后提前选中，但部分列表顺序不能改变选择；
+    /// 后续从详情、下载等页面返回时也不能因为渐进回调改动用户所在分类。
+    private var didCompleteInitialSortLoad = false
+    /// 首个分类的可用内容是否已经成功落地；仅分类接口返回不算完成冷启动。
+    private var didLoadInitialContent = false
     
     init() {
         setupNetworkRestoredAutoRetry()
     }
     
     /// 加载分类列表
-    func loadSorts() async {
-        guard let source = ApiConfig.shared.homeSourceBean else { return }
-        isLoading = true
+    @discardableResult
+    func loadSorts() async -> Bool {
+        guard !sortsLoadInFlight else {
+            // 页面返回时可能与首次加载重叠；保留现有内容，避免刷新被静默判定为失败。
+            return !sorts.isEmpty || !homeVideos.isEmpty
+        }
+        loadGeneration &+= 1
+        let requestGeneration = loadGeneration
+
+        clearFallbackIfPreferredSourceChanged()
+        guard let source = homeSource else {
+            errorMessage = "未找到可用资源站配置"
+            return false
+        }
+        sortsLoadInFlight = true
+        beginLoading()
         errorMessage = nil
-        
-        do {
-            let result = try await sourceService.getSort(sourceBean: source)
-            
-            // 插入本地"推荐"分类，保持 UI 与 Android 版本习惯一致。
-            var allSorts = [MovieSort.SortData.home()]
-            allSorts.append(contentsOf: result.sorts)
-            
-            self.sorts = allSorts
-            self.homeVideos = result.homeVideos
-            lastLoadFailedDueToNetwork = false
-            
-            if selectedSort == nil {
-                selectedSort = allSorts.first
+        defer {
+            sortsLoadInFlight = false
+            endLoading()
+            if requestGeneration == loadGeneration {
+                isLoading = loadingOperationCount > 0 || isWaitingForInitialRetry
             }
-        } catch {
-            errorMessage = error.localizedDescription
-            lastLoadFailedDueToNetwork = error.isNetworkConnectionError
         }
         
-        isLoading = false
+        do {
+            let result = try await sourceService.getSortProgressively(sourceBean: source) { [weak self] partialSorts in
+                guard let self else { return }
+                await self.applyProgressiveSorts(
+                    partialSorts,
+                    source: source,
+                    expectedLoadGeneration: requestGeneration
+                )
+            }
+            guard requestGeneration == loadGeneration else { return false }
+            
+            // 首页标签只展示源返回的子分类；不要把本地“推荐”或西瓜聚合父类混入标签。
+            let allSorts = visibleChildSorts(result.sorts, source: source)
+            // 异常的空响应不能覆盖已经可用的分类，允许后续刷新再次尝试。
+            if !allSorts.isEmpty || self.sorts.isEmpty {
+                self.sorts = allSorts
+            }
+
+            // 部分 CMS 会遗漏 sourceKey；首页卡片必须绑定当前实际请求源，
+            // 否则点击后详情页无法找到对应源。
+            let sourceHomeVideos = videosBoundToSource(result.homeVideos, source: source)
+            // 先展示西瓜源返回的首页，豆瓣榜单仅作为后台海报增强，不能阻塞首屏。
+            if !sourceHomeVideos.isEmpty || self.homeVideos.isEmpty {
+                self.homeVideos = sourceHomeVideos
+            }
+            lastLoadFailedDueToNetwork = false
+
+            let effectiveSorts = self.sorts
+            let selectedIsAvailable = selectedSort.map { selected in
+                effectiveSorts.contains { $0.id == selected.id }
+            } ?? false
+            let isInitialSortLoad = !didCompleteInitialSortLoad
+            if isInitialSortLoad && !hasUserSelectedSort {
+                // 冷启动必须以最终排序后的第一项为准，不能停留在渐进阶段的临时首项。
+                if let firstSort = effectiveSorts.first, selectedSort?.id != firstSort.id {
+                    selectedSort = firstSort
+                    categoryVideos = []
+                    currentPage = 1
+                    hasMore = true
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        await self.loadCategoryVideos(page: 1, sort: firstSort)
+                    }
+                } else if selectedSort == nil {
+                    selectedSort = effectiveSorts.first
+                }
+            } else if !selectedIsAvailable {
+                // 用户选择的标签在新源中不存在时，才回退到新源最终首项。
+                selectedSort = effectiveSorts.first
+                categoryVideos = []
+                currentPage = 1
+                hasMore = true
+                if let firstSort = selectedSort {
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        await self.loadCategoryVideos(page: 1, sort: firstSort)
+                    }
+                }
+            }
+            // 响应结构虽然合法，但完全没有可用分类或推荐时视为本次加载失败；
+            // 这样上层会保留旧内容，下一次刷新仍可重试。
+            if allSorts.isEmpty && sourceHomeVideos.isEmpty {
+                if isGuaziSource(source),
+                   await fallbackFromGuazi(
+                    preferredSource: source,
+                    expectedLoadGeneration: requestGeneration,
+                    preferredSort: selectedSort
+                   ) {
+                    return true
+                }
+                if !hasUserSelectedSort {
+                    errorMessage = nil
+                    isLoading = true
+                    scheduleInitialLoadRetry()
+                } else {
+                    errorMessage = "资源站暂时没有返回可用内容"
+                }
+                return false
+            }
+            if categoryVideos.isEmpty,
+               let selectedSort,
+               selectedSort.id != "home" {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    await self.loadCategoryVideos(page: 1, sort: selectedSort)
+                }
+            }
+            didCompleteInitialSortLoad = true
+
+            let sourceKey = source.key
+            recommendationTask?.cancel()
+            if isXiguaSource(source) {
+                recommendationTask = Task { [weak self] in
+                    guard let self else { return }
+                    let recommendations = await self.loadDoubanRecommendations()
+                    guard self.loadGeneration == requestGeneration,
+                          self.homeSource?.key == sourceKey else { return }
+                    // 豆瓣榜单为空或临时失败时保留西瓜源首页和已有内容。
+                    if !recommendations.isEmpty {
+                        self.homeVideos = recommendations
+                    }
+                }
+            } else {
+                recommendationTask = nil
+            }
+            return true
+        } catch {
+            guard requestGeneration == loadGeneration else { return false }
+            if isGuaziSource(source),
+               await fallbackFromGuazi(
+                preferredSource: source,
+                expectedLoadGeneration: requestGeneration,
+                preferredSort: selectedSort
+               ) {
+                return true
+            }
+            lastLoadFailedDueToNetwork = error.isNetworkConnectionError
+            // 冷启动尚未得到稳定的首个分类时，网络瞬时失败不应把临时错误
+            // 显示给用户，也不能让一个不完整的分类列表成为最终首页状态。
+            if error.isNetworkConnectionError && !didLoadInitialContent && !hasUserSelectedSort {
+                errorMessage = nil
+                isLoading = true
+                scheduleInitialLoadRetry()
+            } else {
+                errorMessage = error.localizedDescription
+            }
+            return false
+        }
+    }
+
+    /// 从豆瓣热门榜中筛出西瓜源确实存在的条目，避免推荐卡片无法播放。
+    private func loadDoubanRecommendations() async -> [Movie.Video] {
+        guard !Task.isCancelled else { return [] }
+        guard let xiguaSource = ApiConfig.shared.sourceBeanList.first(where: isXiguaSource) else { return [] }
+        let trending = await trendingService.fetchTrending(limit: 20)
+        guard !Task.isCancelled, !trending.isEmpty else { return [] }
+
+        let indexedResults = await withTaskGroup(of: (Int, Movie.Video?).self, returning: [(Int, Movie.Video?)].self) { group in
+            var nextIndex = 0
+            let concurrency = min(4, trending.count)
+
+            func makeRecommendationResult(index: Int, item: DoubanTrendingItem) async -> (Int, Movie.Video?) {
+                guard !Task.isCancelled else { return (index, nil) }
+                guard let coverURL = URL(string: item.cover),
+                      let scheme = coverURL.scheme?.lowercased(),
+                      scheme == "http" || scheme == "https" else { return (index, nil) }
+                guard let matches = try? await sourceService.search(sourceBean: xiguaSource, keyword: item.title) else {
+                    return (index, nil)
+                }
+                let target = Self.normalizedTitle(item.title)
+                guard let match = matches.first(where: { Self.normalizedTitle($0.name) == target }) else {
+                    return (index, nil)
+                }
+                var video = match
+                video.pic = item.cover
+                video.sourceKey = xiguaSource.key
+                video.doubanRating = Movie.Video.formatDoubanRating(item.rating)
+                return (index, video)
+            }
+
+            while nextIndex < concurrency {
+                let index = nextIndex
+                let item = trending[index]
+                group.addTask {
+                    await makeRecommendationResult(index: index, item: item)
+                }
+                nextIndex += 1
+            }
+
+            var results: [(Int, Movie.Video?)] = []
+            while let result = await group.next() {
+                if Task.isCancelled {
+                    group.cancelAll()
+                    return []
+                }
+                results.append(result)
+                if nextIndex < trending.count {
+                    let index = nextIndex
+                    let item = trending[index]
+                    group.addTask {
+                        await makeRecommendationResult(index: index, item: item)
+                    }
+                    nextIndex += 1
+                }
+            }
+            return results
+        }
+
+        let recommendations = indexedResults
+            .sorted { $0.0 < $1.0 }
+            .compactMap(\.1)
+        return await PosterCache.shared.fill(recommendations)
+    }
+
+    private func isXiguaSource(_ source: SourceBean) -> Bool {
+        let identity = "\(source.key) \(source.name) \(source.api)".lowercased()
+        return identity.contains("xgzy") || identity.contains("西瓜")
+    }
+
+    /// 瓜子栏目逐页到达时立即发布标签，并尽早请求当前首个分类。
+    private func applyProgressiveSorts(
+        _ sourceSorts: [MovieSort.SortData],
+        source: SourceBean,
+        expectedLoadGeneration: Int
+    ) async {
+        guard expectedLoadGeneration == loadGeneration,
+              homeSource?.key == source.key else { return }
+        // 已有稳定分类时，刷新过程暂存渐进结果，避免标签栏暂时缺项并
+        // 把当前分类误判为不可用；loadSorts 完成后再一次性替换。
+        guard !didCompleteInitialSortLoad else { return }
+        let partialSorts = visibleChildSorts(sourceSorts, source: source)
+        guard !partialSorts.isEmpty else { return }
+
+        sorts = partialSorts
+        guard !hasUserSelectedSort, selectedSort == nil else { return }
+        guard let initialSortID = GuaziHomeCategoryOrder.initialSortID else { return }
+        let initialSort = isGuaziSource(source)
+            ? partialSorts.first(where: { $0.id == initialSortID })
+            : nil
+        guard let initialSort else { return }
+        selectedSort = initialSort
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.loadCategoryVideos(page: 1, sort: initialSort)
+        }
+    }
+
+    private func isGuaziSource(_ source: SourceBean) -> Bool {
+        source.key.caseInsensitiveCompare("guazi") == .orderedSame
+    }
+
+    private func isJianpianSource(_ source: SourceBean) -> Bool {
+        SearchSourceGroup.classify(sourceKey: source.key, sourceName: source.name) == .jianpian
+    }
+
+    private func scheduleInitialLoadRetry() {
+        guard initialLoadRetryTask == nil else { return }
+        let attempt = initialLoadRetryAttempt
+        let delaySeconds = min(30, 1 << min(attempt, 5))
+        initialLoadRetryAttempt = attempt + 1
+        let retryToken = UUID()
+        initialLoadRetryToken = retryToken
+        isWaitingForInitialRetry = true
+        isLoading = true
+        initialLoadRetryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delaySeconds) * 1_000_000_000)
+            guard let self,
+                  self.initialLoadRetryToken == retryToken else { return }
+            self.initialLoadRetryTask = nil
+            self.initialLoadRetryToken = nil
+            self.isWaitingForInitialRetry = false
+            self.isLoading = self.loadingOperationCount > 0
+            guard !Task.isCancelled,
+                  !self.didLoadInitialContent,
+                  !self.hasUserSelectedSort else { return }
+            if self.didCompleteInitialSortLoad, let sort = self.selectedSort {
+                await self.loadCategoryVideos(page: 1, sort: sort)
+            } else {
+                _ = await self.loadSorts()
+            }
+        }
+    }
+
+    private func cancelInitialLoadRetry() {
+        initialLoadRetryTask?.cancel()
+        initialLoadRetryTask = nil
+        initialLoadRetryToken = nil
+        isWaitingForInitialRetry = false
+        isLoading = loadingOperationCount > 0
+    }
+
+    private nonisolated static func normalizedTitle(_ value: String) -> String {
+        value.lowercased().unicodeScalars.filter { scalar in
+            CharacterSet.alphanumerics.contains(scalar) || (scalar.value >= 0x3400 && scalar.value <= 0x9FFF)
+        }.map(String.init).joined()
     }
     
     /// 网络恢复时，若上次因网络错误导致首页为空，自动重新加载。
@@ -74,8 +379,14 @@ class HomeViewModel: ObservableObject {
     }
     
     /// 选择分类
-    func selectSort(_ sort: MovieSort.SortData) {
+    func selectSort(_ sort: MovieSort.SortData, userInitiated: Bool = true) {
         // 切分类时先重置分页状态，避免旧分类残留数据闪烁。
+        if userInitiated {
+            hasUserSelectedSort = true
+            cancelInitialLoadRetry()
+        } else if selectedSort?.id == sort.id, !categoryVideos.isEmpty {
+            return
+        }
         selectedSort = sort
         errorMessage = nil
         categoryVideos = []
@@ -94,30 +405,84 @@ class HomeViewModel: ObservableObject {
     /// 加载分类视频列表
     private func loadCategoryVideos(page: Int, sort: MovieSort.SortData) async {
         guard sort.id != "home" else { return }
-        guard let source = ApiConfig.shared.homeSourceBean else { return }
-        // 防重复并发加载，避免分页错序。
-        guard !isLoading else { return }
-        
-        isLoading = true
-        defer { isLoading = false }
+        guard let source = homeSource else { return }
+        // 只去重同一分类、同一页的请求；首页恢复不能被其他加载任务静默吞掉。
+        let requestKey = "\(source.key)|\(sort.id)|\(page)"
+        guard categoryRequestsInFlight.insert(requestKey).inserted else { return }
+        let requestGeneration = loadGeneration
+        beginLoading()
+        defer {
+            categoryRequestsInFlight.remove(requestKey)
+            endLoading()
+        }
         
         do {
-            let videos = try await sourceService.getList(sourceBean: source, sortData: sort, page: page)
+            let videos = videosBoundToSource(
+                try await sourceService.getList(sourceBean: source, sortData: sort, page: page),
+                source: source
+            )
+            let filteredVideos = strictCategoryVideos(videos, for: sort, source: source)
+            let enrichedVideos = await PosterCache.shared.fill(filteredVideos)
             
             // 分类切换过程中，丢弃旧请求结果
-            guard selectedSort?.id == sort.id else { return }
+            guard requestGeneration == loadGeneration,
+                  selectedSort?.id == sort.id,
+                  homeSource?.key == source.key else { return }
+
+            if page == 1, enrichedVideos.isEmpty, isGuaziSource(source),
+               await fallbackFromGuazi(
+                preferredSource: source,
+                expectedLoadGeneration: requestGeneration,
+                preferredSort: sort,
+                expectedSelectedSortID: sort.id
+               ) {
+                return
+            }
             
             if page == 1 {
-                categoryVideos = videos
+                if enrichedVideos.isEmpty && !didLoadInitialContent && !hasUserSelectedSort {
+                    errorMessage = nil
+                    isLoading = true
+                    scheduleInitialLoadRetry()
+                    return
+                }
+                if enrichedVideos.isEmpty && !categoryVideos.isEmpty {
+                    errorMessage = "资源站暂时没有返回分类内容，请稍后重试"
+                    return
+                }
+                categoryVideos = enrichedVideos
+                if !enrichedVideos.isEmpty {
+                    didLoadInitialContent = true
+                    initialLoadRetryAttempt = 0
+                    cancelInitialLoadRetry()
+                }
             } else {
-                categoryVideos.append(contentsOf: videos)
+                categoryVideos.append(contentsOf: enrichedVideos)
             }
             // 以"返回非空"作为是否继续分页的轻量判断。
             currentPage = page
-            hasMore = !videos.isEmpty
+            hasMore = !enrichedVideos.isEmpty
         } catch {
-            guard selectedSort?.id == sort.id else { return }
-            errorMessage = error.localizedDescription
+            guard requestGeneration == loadGeneration,
+                  selectedSort?.id == sort.id,
+                  homeSource?.key == source.key else { return }
+            if page == 1, isGuaziSource(source),
+               await fallbackFromGuazi(
+                preferredSource: source,
+                expectedLoadGeneration: requestGeneration,
+                preferredSort: sort,
+                expectedSelectedSortID: sort.id
+               ) {
+                return
+            }
+            lastLoadFailedDueToNetwork = error.isNetworkConnectionError
+            if error.isNetworkConnectionError && !didLoadInitialContent && !hasUserSelectedSort {
+                errorMessage = nil
+                isLoading = true
+                scheduleInitialLoadRetry()
+            } else {
+                errorMessage = error.localizedDescription
+            }
         }
     }
     
@@ -140,22 +505,395 @@ class HomeViewModel: ObservableObject {
     
     /// 刷新
     func refresh() async {
-        // 全量刷新时重置分页与错误态，再重新拉分类与当前分类内容。
-        currentPage = 1
-        hasMore = true
-        categoryVideos = []
+        guard !refreshInFlight else { return }
+        refreshInFlight = true
+        defer { refreshInFlight = false }
+
+        // 用户刷新时先重试首选源；若瓜子仍无内容，本轮再依次尝试西瓜和荐片。
+        fallbackPreferredSourceKey = nil
+        fallbackHomeSourceKey = nil
+        refreshGeneration &+= 1
+        let requestGeneration = refreshGeneration
+
+        // 刷新期间保留旧分类内容，等新分类和第一页列表都成功后再替换。
+        let previousSorts = sorts
+        let previousSelectedSort = selectedSort
+        let previousHomeVideos = homeVideos
+        let hadPreviousContent = !previousSorts.isEmpty || !previousHomeVideos.isEmpty || !categoryVideos.isEmpty
         errorMessage = nil
-        await loadSorts()
-        
-        guard let sort = selectedSort else { return }
-        if sort.id == "home" { return }
-        
-        if let matchedSort = sorts.first(where: { $0.id == sort.id }) {
-            selectedSort = matchedSort
-            await loadCategoryVideos(page: 1, sort: matchedSort)
-        } else if let firstCategory = sorts.first(where: { $0.id != "home" }) {
-            selectedSort = firstCategory
-            await loadCategoryVideos(page: 1, sort: firstCategory)
+        let sortsLoaded = await loadSorts()
+        guard requestGeneration == refreshGeneration, sortsLoaded else { return }
+        // loadSorts 可能已完成瓜子->备用源兜底，保留其有效首屏，避免紧接着重复请求并覆盖。
+        if fallbackPreferredSourceKey != nil, !categoryVideos.isEmpty {
+            return
         }
+        
+        // 切换资源源后始终回到排序后的第一个子分类（国产剧优先），
+        // 避免沿用上一个源的分类 id 导致空列表或停留在错误标签。
+        guard let firstCategory = sorts.first else { return }
+        guard let source = homeSource else { return }
+
+        beginLoading()
+        defer { endLoading() }
+        do {
+            let videos = videosBoundToSource(
+                try await sourceService.getList(sourceBean: source, sortData: firstCategory, page: 1),
+                source: source
+            )
+            let filteredVideos = strictCategoryVideos(videos, for: firstCategory, source: source)
+            let enrichedVideos = await PosterCache.shared.fill(filteredVideos)
+            guard requestGeneration == refreshGeneration else { return }
+
+            if enrichedVideos.isEmpty, isGuaziSource(source),
+               await fallbackFromGuazi(
+                preferredSource: source,
+                expectedLoadGeneration: loadGeneration,
+                expectedRefreshGeneration: requestGeneration,
+                preferredSort: firstCategory
+               ) {
+                return
+            }
+
+            if enrichedVideos.isEmpty && !categoryVideos.isEmpty {
+                errorMessage = "资源站暂时没有返回分类内容，请稍后重试"
+                return
+            }
+
+            selectedSort = firstCategory
+            categoryVideos = enrichedVideos
+            currentPage = 1
+            hasMore = !enrichedVideos.isEmpty
+        } catch {
+            guard requestGeneration == refreshGeneration else { return }
+            if let source = homeSource,
+               isGuaziSource(source),
+               await fallbackFromGuazi(
+                preferredSource: source,
+                expectedLoadGeneration: loadGeneration,
+                expectedRefreshGeneration: requestGeneration,
+                preferredSort: selectedSort
+               ) {
+                return
+            }
+            if hadPreviousContent {
+                // 分类请求成功但第一页列表失败时，回滚本轮临时分类/推荐，避免旧列表
+                // 与新分类错配；已有页面内容继续可用，下一次刷新可以重试。
+                sorts = previousSorts
+                selectedSort = previousSelectedSort
+                homeVideos = previousHomeVideos
+            }
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// 瓜子不可用时依次尝试西瓜、荐片；刷新会清除此覆盖并重试瓜子。
+    private func fallbackFromGuazi(
+        preferredSource: SourceBean,
+        expectedLoadGeneration: Int,
+        expectedRefreshGeneration: Int? = nil,
+        preferredSort: MovieSort.SortData? = nil,
+        expectedSelectedSortID: String? = nil
+    ) async -> Bool {
+        guard isGuaziSource(preferredSource),
+              fallbackPreferredSourceKey?.caseInsensitiveCompare(preferredSource.key) != .orderedSame else {
+            return false
+        }
+
+        let config = ApiConfig.shared
+        let fallbackSources = [SearchSourceGroup.xigua, .jianpian].compactMap { group in
+            config.sourceBeanList.first(where: {
+                SearchSourceGroup.classify(sourceKey: $0.key, sourceName: $0.name) == group
+                    && $0.isSelectable
+            })
+        }
+        guard !fallbackSources.isEmpty else { return false }
+
+        func isCurrentRequest() -> Bool {
+            guard loadGeneration == expectedLoadGeneration,
+                  ApiConfig.shared.homeSourceBean?.key.caseInsensitiveCompare(preferredSource.key) == .orderedSame else {
+                return false
+            }
+            if let expectedRefreshGeneration, refreshGeneration != expectedRefreshGeneration {
+                return false
+            }
+            if let expectedSelectedSortID, selectedSort?.id != expectedSelectedSortID {
+                return false
+            }
+            return true
+        }
+
+        let preferredName = preferredSort.map { normalizedCategoryName($0.name) } ?? ""
+        for fallbackSource in fallbackSources {
+            guard isCurrentRequest() else { return false }
+            do {
+                let result = try await sourceService.getSort(sourceBean: fallbackSource)
+                guard isCurrentRequest() else { return false }
+                let fallbackSorts = visibleChildSorts(result.sorts, source: fallbackSource)
+                guard !fallbackSorts.isEmpty else { continue }
+                let matchingSort = fallbackSorts.first { sort in
+                    let name = normalizedCategoryName(sort.name)
+                    if name == preferredName { return true }
+                    if ["电视剧", "连续剧"].contains(preferredName) {
+                        return ["国产剧", "大陆剧", "内地剧"].contains(name)
+                    }
+                    if preferredName == "动漫" {
+                        return name.contains("动漫") || name.contains("动画")
+                    }
+                    return false
+                }
+                let orderedSorts = matchingSort.map { match in
+                    [match] + fallbackSorts.filter { $0.id != match.id }
+                } ?? fallbackSorts
+
+                var firstSortWithVideos: MovieSort.SortData?
+                var videos: [Movie.Video] = []
+                for sort in orderedSorts.prefix(8) {
+                    guard isCurrentRequest() else { return false }
+                    let rawVideos: [Movie.Video]
+                    do {
+                        rawVideos = try await sourceService.getList(
+                            sourceBean: fallbackSource,
+                            sortData: sort,
+                            page: 1
+                        )
+                    } catch {
+                        if error.isNetworkConnectionError {
+                            break
+                        }
+                        continue
+                    }
+                    let filteredVideos = strictCategoryVideos(rawVideos, for: sort, source: fallbackSource)
+                    guard !filteredVideos.isEmpty else { continue }
+                    let cachedVideos = await PosterCache.shared.fill(filteredVideos)
+                    videos = cachedVideos.map { video in
+                        var boundVideo = video
+                        boundVideo.sourceKey = fallbackSource.key
+                        return boundVideo
+                    }
+                    if !videos.isEmpty {
+                        firstSortWithVideos = sort
+                        break
+                    }
+                }
+                guard isCurrentRequest() else { return false }
+                guard let firstSort = firstSortWithVideos, !videos.isEmpty else { continue }
+
+                fallbackPreferredSourceKey = preferredSource.key
+                fallbackHomeSourceKey = fallbackSource.key
+                sorts = fallbackSorts
+                homeVideos = result.homeVideos.map { video in
+                    var boundVideo = video
+                    boundVideo.sourceKey = fallbackSource.key
+                    return boundVideo
+                }
+                selectedSort = firstSort
+                categoryVideos = videos
+                didCompleteInitialSortLoad = true
+                didLoadInitialContent = true
+                initialLoadRetryAttempt = 0
+                currentPage = 1
+                hasMore = true
+                errorMessage = nil
+                lastLoadFailedDueToNetwork = false
+                cancelInitialLoadRetry()
+                return true
+            } catch {
+                guard isCurrentRequest() else { return false }
+                continue
+            }
+        }
+        return false
+    }
+
+    private func clearFallbackIfPreferredSourceChanged() {
+        guard let fallbackPreferredSourceKey else { return }
+        let selectedKey = ApiConfig.shared.homeSourceBean?.key
+        if selectedKey?.caseInsensitiveCompare(fallbackPreferredSourceKey) != .orderedSame {
+            self.fallbackPreferredSourceKey = nil
+            self.fallbackHomeSourceKey = nil
+        }
+    }
+
+    /// 首页重新出现时轻量恢复当前首页分类。短时间内重复 appear 只保留一次，
+    /// 不常驻轮询，避免播放器返回后首页沿用已结束或被取消的请求状态。
+    func handleHomeAppearance() {
+        guard homeAppearanceTask == nil else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastHomeAppearanceReload) >= 1.5 else { return }
+        lastHomeAppearanceReload = now
+        homeAppearanceTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.homeAppearanceTask = nil }
+            let needsNetworkRecovery = self.lastLoadFailedDueToNetwork
+            if self.sorts.isEmpty || self.homeVideos.isEmpty {
+                _ = await self.loadSorts()
+            }
+            guard let sort = self.selectedSort,
+                  !Task.isCancelled else { return }
+            let hasCurrentContent = sort.id == "home"
+                ? !self.homeVideos.isEmpty
+                : !self.categoryVideos.isEmpty
+            guard needsNetworkRecovery || !hasCurrentContent else { return }
+            guard sort.id != "home" else { return }
+            await self.loadCategoryVideos(page: 1, sort: sort)
+        }
+    }
+
+    /// 保存指定源/分类下最后可见的卡片 ID，供从详情、下载等页面返回时恢复滚动位置。
+    func rememberScrollPosition(videoID: String?, sortID: String?) {
+        guard let videoID = videoID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !videoID.isEmpty,
+              let key = scrollPositionStorageKey(for: sortID) else { return }
+        UserDefaults.standard.set(videoID, forKey: key)
+    }
+
+    func savedScrollPosition(sortID: String?) -> String? {
+        guard let key = scrollPositionStorageKey(for: sortID) else { return nil }
+        return UserDefaults.standard.string(forKey: key)
+    }
+
+    private func scrollPositionStorageKey(for sortID: String?) -> String? {
+        let sourceKey = homeSource?.key.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let normalizedSortID = sortID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !sourceKey.isEmpty, !normalizedSortID.isEmpty else { return nil }
+        let source = sourceKey.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? sourceKey
+        let sort = normalizedSortID.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? normalizedSortID
+        return "\(scrollPositionStoragePrefix)\(source).\(sort)"
+    }
+
+    private func beginLoading() {
+        loadingOperationCount += 1
+        isLoading = true
+    }
+
+    private func endLoading() {
+        loadingOperationCount = max(0, loadingOperationCount - 1)
+        isLoading = loadingOperationCount > 0 || isWaitingForInitialRetry
+    }
+
+    /// 过滤父分类并按安卓版规则稳定排序，只保留首页可直接请求的子分类。
+    private func visibleChildSorts(_ sourceSorts: [MovieSort.SortData], source: SourceBean) -> [MovieSort.SortData] {
+        let isXigua = isXiguaSource(source)
+        let isGuazi = source.key.caseInsensitiveCompare("guazi") == .orderedSame
+        var seen = Set<String>()
+        let filtered = sourceSorts.filter { sort in
+            let id = sort.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = normalizedCategoryName(sort.name)
+            guard !id.isEmpty, !name.isEmpty, id != "home" else { return false }
+            if isXigua {
+                if !sort.parentID.isEmpty {
+                    // 西瓜接口的 type_pid=0 是父分类；主页只显示真正的子分类。
+                    guard sort.parentID != "0" else { return false }
+                } else if ["1", "2", "3", "4", "36", "46"].contains(id) {
+                    // 兼容旧接口未返回 type_pid 的情况。
+                    return false
+                }
+            }
+            // 瓜子适配器的首页分类本身就是可请求的一级分类，不能按西瓜的
+            // 父分类规则把“电影/电视剧/动漫/综艺”全部删掉。
+            if !isGuazi && !isJianpianSource(source) && obviousParentCategoryNames.contains(name) { return false }
+            let dedupKey = "\(id)|\(name)"
+            return seen.insert(dedupKey).inserted
+        }
+
+        if isGuazi {
+            return GuaziHomeCategoryOrder.sort(filtered)
+        }
+        if isJianpianSource(source) {
+            let order = Dictionary(uniqueKeysWithValues: JianpianHomeCatalog.sorts.enumerated().map {
+                ($0.element.id, $0.offset)
+            })
+            return filtered.sorted { (order[$0.id] ?? Int.max) < (order[$1.id] ?? Int.max) }
+        }
+
+        // 显式携带源序号，保证相同优先级的分类严格保持源返回顺序。
+        return filtered.enumerated()
+            .sorted {
+                let leftRank = categoryRank($0.element.name)
+                let rightRank = categoryRank($1.element.name)
+                return leftRank == rightRank ? $0.offset < $1.offset : leftRank < rightRank
+            }
+            .map(\.element)
+    }
+
+    /// 默认使用瓜子；失败回退期间临时使用命中的备用源并保留正确的播放源身份。
+    private var homeSource: SourceBean? {
+        let config = ApiConfig.shared
+        if let preferredKey = config.homeSourceBean?.key,
+           fallbackPreferredSourceKey?.caseInsensitiveCompare(preferredKey) == .orderedSame,
+           let fallbackHomeSourceKey,
+           let fallbackSource = config.sourceBeanList.first(where: {
+               $0.key.caseInsensitiveCompare(fallbackHomeSourceKey) == .orderedSame
+                   && $0.isSelectable
+           }) {
+            return fallbackSource
+        }
+        if let selectedSource = config.homeSourceBean {
+            if selectedSource.isSelectable {
+                return selectedSource
+            }
+        }
+        if let guazi = config.sourceBeanList.first(where: {
+            isGuaziSource($0) && $0.isSelectable
+        }) {
+            return guazi
+        }
+        return config.sourceBeanList.first(where: isXiguaSource)
+    }
+
+    private var obviousParentCategoryNames: Set<String> {
+        ["电影", "电影片", "电影类", "电视剧", "连续剧", "电视剧类", "剧集", "影视", "影视剧", "综艺", "综艺片", "综艺类", "动漫", "动漫类", "短剧", "短剧类", "体育", "体育类", "体育赛事"]
+    }
+
+    /// 分类接口偶尔会把推荐或父分类数据混进 list；首页分类只接受精确的子分类 type_id。
+    private func strictCategoryVideos(
+        _ videos: [Movie.Video],
+        for sort: MovieSort.SortData,
+        source: SourceBean
+    ) -> [Movie.Video] {
+        guard isXiguaSource(source) else { return videos }
+        let categoryID = sort.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !categoryID.isEmpty, categoryID != "home" else { return [] }
+        return videos.filter { video in
+            let videoTypeID = video.tid.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !videoTypeID.isEmpty && videoTypeID == categoryID
+        }
+    }
+
+    private func videosBoundToSource(_ videos: [Movie.Video], source: SourceBean) -> [Movie.Video] {
+        videos.map { video in
+            guard video.sourceKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return video
+            }
+            var boundVideo = video
+            boundVideo.sourceKey = source.key
+            return boundVideo
+        }
+    }
+
+    private func normalizedCategoryName(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "\u{3000}", with: "")
+            .lowercased()
+    }
+
+    private func categoryRank(_ value: String) -> Int {
+        let name = normalizedCategoryName(value)
+        if name.contains("伦理") || name.contains("理论片") { return 10000 }
+        if ["国产剧", "大陆剧", "内地剧", "国产电视剧"].contains(name) { return 0 }
+        if ["喜剧片", "喜剧"].contains(name) { return 10 }
+        if ["爱情片", "爱情"].contains(name) { return 20 }
+        if ["动作片", "动作"].contains(name) { return 30 }
+        if ["科幻片", "科幻"].contains(name) { return 40 }
+        if ["恐怖片", "恐怖"].contains(name) { return 50 }
+        if ["剧情片", "剧情"].contains(name) { return 60 }
+        if ["战争片", "战争"].contains(name) { return 70 }
+        if name.contains("纪录片") || name.contains("记录片") { return 80 }
+        if name.contains("动画") || name.contains("动漫") { return 90 }
+        if name.contains("综艺") { return 100 }
+        if name.contains("体育") || name.contains("赛事") { return 110 }
+        if name.contains("短剧") { return 120 }
+        return 1000
     }
 }

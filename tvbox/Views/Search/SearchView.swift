@@ -4,11 +4,16 @@ import SwiftUI
 struct SearchView: View {
     /// 搜索状态与结果管理。
     @StateObject private var viewModel = SearchViewModel()
+    @ObservedObject private var apiConfig = ApiConfig.shared
+    /// 豆瓣当前热门条目，作为搜索页空态热搜榜。
+    @State private var trendingItems: [DoubanTrendingItem] = []
+    @State private var isLoadingTrending = false
+    @State private var trendingError: String?
     
     #if os(iOS)
     /// iOS 卡片网格参数。
     private let columns = [
-        GridItem(.adaptive(minimum: 120, maximum: 160), spacing: 12)
+        GridItem(.adaptive(minimum: 100, maximum: 132), spacing: 10)
     ]
     #else
     /// macOS 卡片网格参数。
@@ -18,47 +23,76 @@ struct SearchView: View {
     #endif
     
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                // 搜索栏
-                searchBar
-                
-                // 内容
-                if viewModel.isSearching {
+        VStack(spacing: 0) {
+            // 搜索栏
+            searchBar
+
+            // 内容
+            if viewModel.isSearching {
+                if viewModel.results.isEmpty {
                     Spacer()
                     ProgressView("搜索中...")
                         .tint(.orange)
                     Spacer()
-                } else if !viewModel.results.isEmpty {
+                } else {
                     searchResults
-                } else if viewModel.keyword.isEmpty {
-                    // 输入为空时显示历史；输入非空但无结果时显示提示文案。
-                    searchHistorySection
-                } else if let error = viewModel.errorMessage {
-                    Spacer()
-                    VStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass")
-                            .font(.largeTitle)
-                            .foregroundColor(.gray)
-                        Text(error)
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
+                        .overlay(alignment: .top) {
+                            ProgressView()
+                                .tint(.orange)
+                                .padding(.top, 6)
+                        }
                 }
+            } else if !viewModel.results.isEmpty {
+                searchResults
+            } else if viewModel.keyword.isEmpty {
+                // 输入为空时显示历史；输入非空但无结果时显示提示文案。
+                searchHistorySection
+            } else if let error = viewModel.errorMessage {
+                Spacer()
+                VStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.largeTitle)
+                        .foregroundColor(.gray)
+                    Text(error)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
             }
-            .background(Color(red: 0.08, green: 0.08, blue: 0.1))
-            .navigationTitle("搜索")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Color(red: 0.08, green: 0.08, blue: 0.1))
+        #if os(iOS)
+        .ignoresSafeArea(.keyboard, edges: .bottom)
+        #endif
+        .navigationTitle("搜索")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .task {
+            await loadTrending()
+        }
+    }
+
+    /// 加载热搜榜；失败时保留历史搜索，不阻断正常搜索功能。
+    @MainActor
+    private func loadTrending() async {
+        guard trendingItems.isEmpty, !isLoadingTrending else { return }
+        isLoadingTrending = true
+        trendingError = nil
+        let items = await DoubanTrendingService.shared.fetchTrending(limit: 20)
+        trendingItems = items
+        if items.isEmpty {
+            trendingError = "暂时无法获取热搜榜"
+        }
+        isLoadingTrending = false
     }
     
     // MARK: - 搜索栏
     
     /// 顶部搜索输入区。
     private var searchBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
         HStack(spacing: 12) {
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass")
@@ -73,16 +107,20 @@ struct SearchView: View {
                     .onSubmit {
                         Task { await viewModel.search() }
                     }
+                    .onChange(of: viewModel.keyword) { _, value in
+                        viewModel.updateSearchSuggestions(for: value)
+                    }
                     #if os(iOS)
                     .autocapitalization(.none)
                     #endif
                 
                 if !viewModel.keyword.isEmpty {
-                    Button {
-                        withAnimation {
-                            viewModel.keyword = ""
-                            viewModel.results = []
-                        }
+                        Button {
+                            withAnimation {
+                                viewModel.cancelSearch()
+                                viewModel.keyword = ""
+                                viewModel.results = []
+                            }
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundColor(.white.opacity(0.4))
@@ -102,7 +140,7 @@ struct SearchView: View {
             Button {
                 Task { await viewModel.search() }
             } label: {
-                Text("搜索")
+                Text(apiConfig.isLoaded ? "搜索" : "加载中")
                     .font(.system(size: 15, weight: .bold))
                     .foregroundColor(.white)
                     .padding(.horizontal, 16)
@@ -111,83 +149,292 @@ struct SearchView: View {
                     .cornerRadius(14)
             }
             .buttonStyle(.plain)
+            .disabled(!apiConfig.isLoaded || viewModel.isSearching)
+            .opacity(apiConfig.isLoaded ? 1 : 0.65)
+        }
+            if !viewModel.keyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !viewModel.isSearching,
+               viewModel.results.isEmpty,
+               !viewModel.searchSuggestions.isEmpty {
+                suggestionSection
+            }
         }
         .padding(.horizontal, 20)
         .padding(.top, 20)
         .padding(.bottom, 10)
+    }
+
+    private var suggestionSection: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(viewModel.searchSuggestions, id: \.self) { suggestion in
+                Button {
+                    Task { await viewModel.searchSuggestion(suggestion) }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(suggestion)
+                            .font(.subheadline)
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.white.opacity(0.06))
+        .cornerRadius(8)
     }
     
     // MARK: - 搜索结果
     
     /// 搜索结果网格。
     private var searchResults: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, spacing: 16) {
-                ForEach(viewModel.results) { video in
-                    NavigationLink(value: video) {
-                        VodCardView(video: video)
+        HStack(spacing: 0) {
+            sourceFilter
+                .frame(width: 62)
+
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 12) {
+                    ForEach(viewModel.filteredResults, id: \.searchCardIdentity) { video in
+                        NavigationLink(destination: DetailView(video: video)) {
+                            VodCardView(video: video, sourceLabel: sourceName(for: video.sourceKey))
+                        }
+                        #if os(iOS)
+                        .buttonStyle(VodCardPressStyle())
+                        #else
+                        .buttonStyle(.plain)
+                        #endif
                     }
-                    #if os(iOS)
-                    .buttonStyle(VodCardPressStyle())
-                    #else
-                    .buttonStyle(.plain)
-                    #endif
                 }
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 12)
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
-        }
-        .navigationDestination(for: Movie.Video.self) { video in
-            DetailView(video: video)
         }
     }
-    
+
+    /// 固定顺序的来源筛选栏，仅过滤已返回结果。
+    private var sourceFilter: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(spacing: 5) {
+                sourceGroupButton(title: "全部", group: nil)
+                ForEach([
+                    SearchSourceGroup.guazi, .jianpian, .xigua, .feifan, .baofeng,
+                    .tiantang, .liangzi, .ruyi, .xintong
+                ]) { group in
+                    sourceGroupButton(title: group.title, group: group)
+                }
+                ForEach(viewModel.availableOtherSourceKeys, id: \.self) { key in
+                    sourceKeyButton(title: viewModel.displayName(for: key), key: key)
+                }
+                sourceGroupButton(title: SearchSourceGroup.changzhang.title, group: .changzhang)
+                sourceGroupButton(title: SearchSourceGroup.moli.title, group: .moli)
+                sourceGroupButton(title: SearchSourceGroup.cheese.title, group: .cheese)
+                sourceGroupButton(title: SearchSourceGroup.nuomi.title, group: .nuomi)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 8)
+        }
+        .frame(maxHeight: .infinity)
+        .background(Color.white.opacity(0.035))
+    }
+
+    private func sourceGroupButton(title: String, group: SearchSourceGroup?) -> some View {
+        let selected = viewModel.selectedSourceGroup == group && viewModel.selectedSourceKey == nil
+        let available = group.map { viewModel.availableSourceGroups.contains($0) } ?? true
+        return Button {
+            viewModel.selectedSourceGroup = group
+            viewModel.selectedSourceKey = nil
+        } label: {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, minHeight: 34)
+                .foregroundColor(selected ? .white : (available ? .secondary : .secondary.opacity(0.45)))
+                .background(selected ? Color.orange : Color.clear)
+                .cornerRadius(4)
+        }
+        .buttonStyle(.plain)
+        .disabled(!available)
+    }
+
+    private func sourceKeyButton(title: String, key: String) -> some View {
+        Button {
+            viewModel.selectedSourceGroup = nil
+            viewModel.selectedSourceKey = key
+        } label: {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, minHeight: 34)
+                .foregroundColor(viewModel.selectedSourceKey == key ? .white : .secondary)
+                .background(viewModel.selectedSourceKey == key ? Color.orange : Color.clear)
+                .cornerRadius(4)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func sourceName(for key: String) -> String {
+        let name = apiConfig.sourceBeanList.first(where: {
+            $0.key.caseInsensitiveCompare(key) == .orderedSame
+        })?.name
+        return SearchSourceGroup.displayName(sourceKey: key, sourceName: name)
+    }
+
     // MARK: - 搜索历史
     
     /// 搜索历史区域，支持复用历史关键词与一键清空。
     private var searchHistorySection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if !viewModel.searchHistory.isEmpty {
-                HStack {
-                    Text("搜索历史")
-                        .font(.headline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    Button {
-                        viewModel.clearHistory()
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "trash")
-                            Text("清空")
-                        }
-                        .font(.caption)
-                        .foregroundColor(.gray)
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 16)
-                
-                FlowLayout(spacing: 8) {
-                    ForEach(viewModel.searchHistory, id: \.self) { keyword in
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                if !viewModel.searchHistory.isEmpty {
+                    HStack {
+                        Text("搜索历史")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                        Spacer()
                         Button {
-                            viewModel.keyword = keyword
+                            viewModel.clearHistory()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "trash")
+                                Text("清空")
+                            }
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                        }
+                    }
+                    .padding(.horizontal, 20)
+
+                    FlowLayout(spacing: 8) {
+                        ForEach(viewModel.searchHistory, id: \.self) { keyword in
+                            HStack(spacing: 4) {
+                                Button {
+                                    viewModel.keyword = keyword
+                                    Task { await viewModel.search() }
+                                } label: {
+                                    Text(keyword)
+                                        .font(.subheadline)
+                                        .foregroundColor(.white.opacity(0.8))
+                                        .padding(.leading, 14)
+                                        .padding(.vertical, 7)
+                                }
+                                .buttonStyle(.plain)
+
+                                Button {
+                                    viewModel.removeFromHistory(keyword)
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.caption2.weight(.bold))
+                                        .foregroundColor(.white.opacity(0.55))
+                                        .frame(width: 26, height: 28)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.trailing, 3)
+                            .background(Color.white.opacity(0.1))
+                            .clipShape(Capsule())
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                }
+
+                trendingSection
+
+                if trendingItems.isEmpty, !isLoadingTrending, let trendingError {
+                    Text(trendingError)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, 12)
+                }
+            }
+            .padding(.top, 16)
+            .padding(.bottom, 24)
+        }
+    }
+
+    /// 当前热搜榜。条目使用豆瓣封面，点击后直接复用原搜索逻辑。
+    private var trendingSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("当前热搜榜")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                Spacer()
+                if isLoadingTrending {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.orange)
+                }
+            }
+            .padding(.horizontal, 20)
+
+            if !trendingItems.isEmpty {
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(trendingItems.enumerated()), id: \.element.id) { index, item in
+                        Button {
+                            viewModel.keyword = item.title
                             Task { await viewModel.search() }
                         } label: {
-                            Text(keyword)
-                                .font(.subheadline)
-                                .foregroundColor(.white.opacity(0.8))
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 7)
-                                .background(Color.white.opacity(0.1))
-                                .cornerRadius(16)
+                            HStack(spacing: 12) {
+                                Text("\(index + 1)")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundColor(index < 3 ? .orange : .secondary)
+                                    .frame(width: 24)
+
+                                CachedAsyncImage(url: URL.posterURL(from: item.cover)) { image in
+                                    image
+                                        .resizable()
+                                        .scaledToFill()
+                                } placeholder: {
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .fill(Color.white.opacity(0.08))
+                                        .overlay(
+                                            Image(systemName: "film")
+                                                .font(.caption)
+                                                .foregroundColor(.white.opacity(0.3))
+                                        )
+                                }
+                                .frame(width: 38, height: 52)
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(item.title)
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundColor(.white)
+                                        .lineLimit(1)
+                                    HStack(spacing: 6) {
+                                        if !item.rating.isEmpty {
+                                            Text("评分 \(item.rating)")
+                                        }
+                                        if !item.year.isEmpty {
+                                            Text(item.year)
+                                        }
+                                    }
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                }
+                                Spacer(minLength: 0)
+                                Image(systemName: "magnifyingglass")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 8)
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(.horizontal, 20)
             }
-            
-            Spacer()
         }
     }
 }

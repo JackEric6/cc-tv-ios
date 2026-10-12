@@ -8,17 +8,67 @@ class SearchViewModel: ObservableObject {
     @Published var keyword: String = ""
     /// 当前结果列表。
     @Published var results: [Movie.Video] = []
+    @Published var searchSuggestions: [String] = []
     /// 搜索加载状态，用于控制进度指示器。
     @Published var isSearching = false
     /// 本地搜索历史（最近在前）。
     @Published var searchHistory: [String] = []
     /// 搜索失败或空结果提示。
     @Published var errorMessage: String?
+    /// 当前展示来源分组；nil 表示显示全部来源。
+    @Published var selectedSourceGroup: SearchSourceGroup?
+    /// 当前选中的非固定来源；与固定来源分组互斥。
+    @Published var selectedSourceKey: String?
     
     /// 源数据服务（负责多源并发搜索）。
     private let sourceService = SourceService.shared
     /// 搜索请求序号（用于丢弃过期异步结果）。
     private var latestSearchRequestId: UUID = UUID()
+    /// 当前搜索任务；重新搜索时取消，避免旧请求继续占用网络和回写结果。
+    private var activeSearchTask: Task<Void, Never>?
+    private var suggestionTask: Task<Void, Never>?
+    private var suggestionRequestId = UUID()
+    private var ignoredSuggestionKeyword = ""
+    /// 避免快速连续点击在同一瞬间创建多个聚合请求。
+    private static let searchDebounceNanoseconds: UInt64 = 160_000_000
+    /// 暂存所有源返回的数据。`results` 只暴露带有效海报的可展示结果。
+    private var pendingResults: [Movie.Video] = []
+    private var pendingResultKeys: Set<String> = []
+
+    /// 按首次返回顺序列出当前搜索结果实际包含的来源。
+    var availableSourceKeys: [String] {
+        var seen = Set<String>()
+        return results.compactMap { video in
+            let key = video.sourceKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty, seen.insert(key).inserted else { return nil }
+            return key
+        }
+    }
+
+    var availableSourceGroups: Set<SearchSourceGroup> {
+        Set(results.map { sourceGroup(for: $0.sourceKey) })
+    }
+
+    /// 每个实际出现的非固定来源单独提供筛选项，不再聚合成“其他影视源”。
+    var availableOtherSourceKeys: [String] {
+        var seen = Set<String>()
+        return results.compactMap { video in
+            let key = video.sourceKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty,
+                  sourceGroup(for: key) == .other,
+                  seen.insert(key.lowercased()).inserted else { return nil }
+            return key
+        }
+    }
+
+    /// 站点筛选只改变本地展示，不改变原始视频的 sourceKey、id 或播放配置。
+    var filteredResults: [Movie.Video] {
+        if let selectedSourceGroup {
+            return results.filter { sourceGroup(for: $0.sourceKey) == selectedSourceGroup }
+        }
+        guard let selectedSourceKey else { return results }
+        return results.filter { $0.sourceKey.caseInsensitiveCompare(selectedSourceKey) == .orderedSame }
+    }
     
     /// 初始化时同步加载本地历史记录，确保搜索页首次渲染即可展示。
     init() {
@@ -29,48 +79,188 @@ class SearchViewModel: ObservableObject {
     func search() async {
         let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        guard ApiConfig.shared.isLoaded else {
+            errorMessage = "影视源配置仍在加载，请稍后重试"
+            return
+        }
+
+        clearSearchSuggestions()
+
+        activeSearchTask?.cancel()
         let requestId = UUID()
         latestSearchRequestId = requestId
         
         isSearching = true
         errorMessage = nil
         results = []
-        
+        selectedSourceGroup = nil
+        selectedSourceKey = nil
+        pendingResults = []
+        pendingResultKeys = []
+
+        defer {
+            if requestId == latestSearchRequestId {
+                isSearching = false
+                activeSearchTask = nil
+            }
+        }
+
         // 搜索一旦触发就先落历史，保持行为与移动端常见搜索体验一致。
         addToHistory(trimmed)
         
-        // 走多源并发搜索，返回聚合后的影片列表。
-        let videos = await sourceService.searchAll(keyword: trimmed)
-        guard requestId == latestSearchRequestId else { return }
-        self.results = videos
-        
-        if videos.isEmpty {
-            errorMessage = "未找到相关内容"
+        // 每个源完成后立即追加一批结果；旧关键词的回调会被请求序号丢弃。
+        let task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(nanoseconds: Self.searchDebounceNanoseconds)
+                try Task.checkCancellation()
+            } catch {
+                return
+            }
+            await self.sourceService.searchAllStreaming(keyword: trimmed) { [weak self] videos in
+                guard let self, requestId == self.latestSearchRequestId else { return }
+                self.appendCandidates(videos)
+                let enriched = await PosterCache.shared.enrich(self.pendingResults)
+                // enrich 跨 actor 等待期间可能已经开始了新搜索，禁止旧批次回写。
+                guard requestId == self.latestSearchRequestId else { return }
+                self.results = enriched
+            } onSourceError: { [weak self] sourceKey, message in
+                guard let self, requestId == self.latestSearchRequestId,
+                      sourceKey.caseInsensitiveCompare("guazi") == .orderedSame else { return }
+                self.errorMessage = "瓜子搜索失败：\(message)"
+            }
         }
+        activeSearchTask = task
+        await task.value
+
+        guard requestId == latestSearchRequestId else { return }
+        if results.isEmpty {
+            errorMessage = errorMessage ?? "未找到相关内容"
+        }
+        activeSearchTask = nil
         
-        isSearching = false
     }
     
     /// 在指定源搜索
     func searchInSource(_ source: SourceBean) async {
         let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        clearSearchSuggestions()
+        activeSearchTask?.cancel()
+        activeSearchTask = nil
         let requestId = UUID()
         latestSearchRequestId = requestId
+        addToHistory(trimmed)
         
         isSearching = true
         errorMessage = nil
-        
+
+        defer {
+            if requestId == latestSearchRequestId {
+                isSearching = false
+            }
+        }
+
         do {
             let videos = try await sourceService.search(sourceBean: source, keyword: trimmed)
             guard requestId == latestSearchRequestId else { return }
-            self.results = videos
+            pendingResults = []
+            pendingResultKeys = []
+            selectedSourceGroup = nil
+            selectedSourceKey = nil
+            appendCandidates(videos)
+            let enriched = await PosterCache.shared.enrich(pendingResults)
+            guard requestId == latestSearchRequestId else { return }
+            results = enriched
         } catch {
             guard requestId == latestSearchRequestId else { return }
             errorMessage = error.localizedDescription
         }
         
+    }
+
+    /// 合并同一源的重复结果，同时保留不同源的播放入口。
+    private func appendCandidates(_ videos: [Movie.Video]) {
+        for video in videos {
+            guard pendingResultKeys.insert(video.searchCardIdentity).inserted else { continue }
+            pendingResults.append(video)
+        }
+        pendingResults = SearchSourceGroup.sorted(
+            pendingResults,
+            sourceKey: \.sourceKey,
+            sourceName: { self.sourceName(for: $0.sourceKey) }
+        )
+    }
+
+    private func sourceGroup(for sourceKey: String) -> SearchSourceGroup {
+        SearchSourceGroup.classify(sourceKey: sourceKey, sourceName: sourceName(for: sourceKey))
+    }
+
+    private func sourceName(for sourceKey: String) -> String? {
+        ApiConfig.shared.sourceBeanList.first {
+            $0.key.caseInsensitiveCompare(sourceKey) == .orderedSame
+        }?.name
+    }
+
+    func displayName(for sourceKey: String) -> String {
+        SearchSourceGroup.displayName(sourceKey: sourceKey, sourceName: sourceName(for: sourceKey))
+    }
+
+    /// 取消当前搜索并结束加载状态。
+    func cancelSearch() {
+        activeSearchTask?.cancel()
+        activeSearchTask = nil
+        latestSearchRequestId = UUID()
         isSearching = false
+    }
+
+    func updateSearchSuggestions(for value: String) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if ignoredSuggestionKeyword == trimmed {
+            ignoredSuggestionKeyword = ""
+            return
+        }
+        cancelSearch()
+        results = []
+        pendingResults = []
+        pendingResultKeys = []
+        selectedSourceGroup = nil
+        selectedSourceKey = nil
+        errorMessage = nil
+        clearSearchSuggestions()
+
+        guard !trimmed.isEmpty else { return }
+        let requestId = suggestionRequestId
+        suggestionTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 250_000_000)
+                try Task.checkCancellation()
+            } catch {
+                return
+            }
+            let suggestions = await SearchSuggestionService.fetch(keyword: trimmed)
+            guard let self,
+                  requestId == self.suggestionRequestId,
+                  self.keyword.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed else { return }
+            self.searchSuggestions = suggestions
+            self.suggestionTask = nil
+        }
+    }
+
+    func searchSuggestion(_ value: String) async {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed != keyword.trimmingCharacters(in: .whitespacesAndNewlines) {
+            ignoredSuggestionKeyword = trimmed
+        }
+        keyword = trimmed
+        await search()
+    }
+
+    private func clearSearchSuggestions() {
+        suggestionTask?.cancel()
+        suggestionTask = nil
+        suggestionRequestId = UUID()
+        searchSuggestions = []
     }
     
     // MARK: - 搜索历史

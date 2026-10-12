@@ -10,14 +10,12 @@ private func makeVodBusinessKey(vodId: String, sourceKey: String) -> String {
     return "\(normalizedSourceKey)::\(normalizedVodId)"
 }
 
-/// 单部剧的续播状态
-struct VodPlaybackState: Codable {
-    /// 当前播放线路标识。
-    var flag: String
-    /// 剧集索引。
-    var episodeIndex: Int
-    /// 播放进度（秒）。
-    var progressSeconds: Double
+/// 历史去重使用的影视标题键：忽略大小写、空白和标点。
+private func makeHistoryTitleKey(_ value: String) -> String {
+    value.lowercased().unicodeScalars.filter { scalar in
+        CharacterSet.alphanumerics.contains(scalar)
+            || (scalar.value >= 0x3400 && scalar.value <= 0x9FFF)
+    }.map(String.init).joined()
 }
 
 /// 视频收藏
@@ -175,11 +173,30 @@ actor CacheStore {
         let bizKey = makeVodBusinessKey(vodId: vodId, sourceKey: sourceKey)
         
         do {
-            let matched = try fetchRecords(vodId: vodId, sourceKey: sourceKey, context: context)
+            let exactMatches = try fetchRecords(vodId: vodId, sourceKey: sourceKey, context: context)
+            let titleKey = makeHistoryTitleKey(video.name)
+            let titleMatches: [VodRecord]
+            if titleKey.isEmpty {
+                titleMatches = []
+            } else {
+                let allRecords = try context.fetch(FetchDescriptor<VodRecord>())
+                titleMatches = allRecords.filter {
+                    makeHistoryTitleKey($0.vodName) == titleKey
+                }.sorted { $0.updateTime > $1.updateTime }
+            }
+            var matched = exactMatches
+            for candidate in titleMatches where !matched.contains(where: { $0 === candidate }) {
+                matched.append(candidate)
+            }
+            matched.sort { $0.updateTime > $1.updateTime }
             
             // 更新或插入
             if let record = matched.first {
                 record.bizKey = bizKey
+                record.vodId = vodId
+                record.vodName = video.name
+                record.vodPic = video.pic
+                record.sourceKey = sourceKey
                 record.playNote = playNote
                 if let encodedState {
                     record.dataJson = encodedState
@@ -215,7 +232,9 @@ actor CacheStore {
             guard let record = try fetchRecords(vodId: vodId, sourceKey: sourceKey, context: context).first else {
                 return nil
             }
+            // 兼容早期只保存 playNote、尚未写入 dataJson 的历史记录。
             return Self.decodePlaybackState(record.dataJson)
+                ?? Self.decodeLegacyPlaybackState(record.playNote)
         } catch {
             print("读取续播状态失败: \(error)")
             return nil
@@ -286,5 +305,84 @@ actor CacheStore {
     private nonisolated static func decodePlaybackState(_ json: String) -> VodPlaybackState? {
         guard let data = json.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(VodPlaybackState.self, from: data)
+    }
+
+    /// 清理已有的同名重复历史，只保留最近播放的一条。
+    @MainActor
+    func deduplicateHistory(context: ModelContext) {
+        do {
+            let records = try context.fetch(FetchDescriptor<VodRecord>())
+            var newestByTitle: [String: VodRecord] = [:]
+            var duplicates: [VodRecord] = []
+
+            for record in records {
+                let titleKey = makeHistoryTitleKey(record.vodName)
+                let identity = titleKey.isEmpty ? record.bizKey : titleKey
+                guard !identity.isEmpty else { continue }
+                if let existing = newestByTitle[identity] {
+                    if record.updateTime > existing.updateTime {
+                        duplicates.append(existing)
+                        newestByTitle[identity] = record
+                    } else {
+                        duplicates.append(record)
+                    }
+                } else {
+                    newestByTitle[identity] = record
+                }
+            }
+
+            guard !duplicates.isEmpty else { return }
+            for duplicate in duplicates {
+                context.delete(duplicate)
+            }
+            try context.save()
+        } catch {
+            print("清理重复历史失败: \(error)")
+        }
+    }
+
+    /// 从旧版本的“第 N 集 08:45”文本记录恢复基础续播状态。
+    /// 旧记录没有线路字段，使用空 flag 让详情页回退到当前源的默认线路。
+    private nonisolated static func decodeLegacyPlaybackState(_ note: String) -> VodPlaybackState? {
+        let text = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+
+        let episodeIndex: Int = {
+            let pattern = #"第\s*(\d+)\s*集"#
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(
+                      in: text,
+                      range: NSRange(text.startIndex..., in: text)
+                  ),
+                  let range = Range(match.range(at: 1), in: text),
+                  let number = Int(text[range]), number > 0 else {
+                return 0
+            }
+            return number - 1
+        }()
+
+        let timePattern = #"(?:(\d+):)?(\d{1,2}):(\d{2})\s*$"#
+        guard let regex = try? NSRegularExpression(pattern: timePattern),
+              let match = regex.firstMatch(
+                  in: text,
+                  range: NSRange(text.startIndex..., in: text)
+              ) else {
+            return VodPlaybackState(flag: "", episodeIndex: episodeIndex, progressSeconds: 0)
+        }
+
+        func capture(_ index: Int) -> Int {
+            guard let range = Range(match.range(at: index), in: text) else { return 0 }
+            return Int(text[range]) ?? 0
+        }
+
+        let hours = capture(1)
+        let minutes = capture(2)
+        let seconds = capture(3)
+        let progress = Double(hours * 3600 + minutes * 60 + seconds)
+        return VodPlaybackState(
+            flag: "",
+            episodeIndex: episodeIndex,
+            progressSeconds: progress
+        )
     }
 }

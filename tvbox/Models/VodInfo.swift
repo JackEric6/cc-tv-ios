@@ -1,7 +1,7 @@
 import Foundation
 
 /// 视频详情模型 - 对应 Android 版 VodInfo.java
-struct VodInfo: Codable, Identifiable {
+struct VodInfo: Codable, Identifiable, Sendable {
     /// 视频唯一 ID。
     var id: String
     /// 标题。
@@ -22,6 +22,8 @@ struct VodInfo: Codable, Identifiable {
     var actor: String = ""
     /// 简介。
     var des: String = ""
+    /// 豆瓣评分；跨源详情补全时仅填充当前详情缺失的评分。
+    var doubanRating: String = ""
     /// 来源站点 key。
     var sourceKey: String = ""
     
@@ -36,7 +38,7 @@ struct VodInfo: Codable, Identifiable {
     var playIndex: Int = 0
     
     /// 单集信息
-    struct Episode: Codable, Identifiable, Hashable {
+    struct Episode: Codable, Identifiable, Hashable, Sendable {
         var id: String { name }
         /// 集标题。
         let name: String
@@ -61,27 +63,31 @@ struct VodInfo: Codable, Identifiable {
         info.director = video.director
         info.actor = video.actor
         info.des = video.des.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        info.doubanRating = video.doubanRating
         info.sourceKey = video.sourceKey
         
         // 解析播放列表：
         // playFrom 格式: "线路1$$$线路2$$$线路3"
         // playUrl  格式: "第1集$url1#第2集$url2$$$第1集$url3#第2集$url4"
-        let flags = playFrom.components(separatedBy: "$$$").filter { !$0.isEmpty }
+        let flags = playFrom.components(separatedBy: "$$$")
         let urls = playUrl.components(separatedBy: "$$$")
-        
-        info.playFlags = flags
-        for (i, flag) in flags.enumerated() {
-            if i < urls.count {
-                let episodes = urls[i].components(separatedBy: "#").compactMap { item -> Episode? in
-                    let parts = item.components(separatedBy: "$")
-                    guard parts.count >= 2 else { return nil }
-                    return Episode(name: parts[0], url: parts[1])
-                }
-                info.playUrlMap[flag] = episodes
+
+        for (index, rawFlag) in flags.enumerated() where urls.indices.contains(index) {
+            let flag = rawFlag.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !flag.isEmpty else { continue }
+            let episodes = urls[index].components(separatedBy: "#").compactMap { item -> Episode? in
+                guard let separator = item.firstIndex(of: "$"), separator != item.startIndex else { return nil }
+                let name = String(item[..<separator]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let url = String(item[item.index(after: separator)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty, !url.isEmpty else { return nil }
+                return Episode(name: name, url: url)
             }
+            guard !episodes.isEmpty else { continue }
+            info.playFlags.append(flag)
+            info.playUrlMap[flag] = episodes
         }
         
-        if let first = flags.first {
+        if let first = info.playFlags.first {
             info.playFlag = first
         }
         

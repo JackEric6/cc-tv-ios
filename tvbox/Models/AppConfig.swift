@@ -141,6 +141,7 @@ struct ParseBean: Codable, Identifiable, Hashable {
 struct AppConfigData: Codable {
     var spider: String?
     var wallpaper: String?
+    var danmaku: String?
     var sites: [SiteConfig]?
     var parses: [ParseConfig]?
     var lives: [LiveConfig]?
@@ -160,6 +161,14 @@ struct AppConfigData: Codable {
         var playerType: FlexibleInt?
         var type: FlexibleInt?
         var ext: AnyCodableValue?
+        var timeout: FlexibleInt?
+        var headers: [String: AnyCodableValue]?
+        var icon: String?
+        var changeable: FlexibleInt?
+        var hidden: Bool?
+        var disabled: Bool?
+        var backupApi: [String]?
+        var backupDomain: [String]?
         var jar: String?
         var style: AnyCodableValue?
         var playUrl: String?
@@ -168,7 +177,9 @@ struct AppConfigData: Codable {
         
         enum CodingKeys: String, CodingKey {
             case key, name, api, searchable, filterable, quickSearch
-            case playerType, type, ext, jar, style, playUrl, categories, click
+            case playerType, type, ext, timeout, headers, icon, changeable
+            case hidden, disabled, backupApi, backupDomain
+            case jar, style, playUrl, categories, click
             // type_flag 也可能出现
         }
     }

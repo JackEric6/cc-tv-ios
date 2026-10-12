@@ -1,13 +1,13 @@
 import Foundation
 
-/// 对 movie2_kktvs 对应的 KKT影视 CMS 响应做轻量整理。
+/// 对 TVBox CMS 响应和旧本机代理地址做轻量整理。
 ///
 /// KKT影视部分历史数据会把播放器页、真实媒体地址和多集地址混在同一组
 /// `vod_play_url` 中。这里保持 TVBox 的字段格式，只调整线路优先级并解开
 /// 能安全识别的 `url`/`play` 参数，不依赖 Java、JAR 或本地桥接服务。
 enum KktvsResponseNormalizer {
     private static let mediaExtensions = [
-        ".m3u8", ".mp4", ".flv", ".mkv", ".webm", ".mov"
+        ".m3u8", ".m3u", ".mpd", ".mp4", ".flv", ".mkv", ".webm", ".mov"
     ]
 
     static func normalize(_ response: String) -> String {
@@ -30,10 +30,9 @@ enum KktvsResponseNormalizer {
         return normalized
     }
 
-    /// 远程 movie2_kktvs 仍包含旧 Android 本地代理地址；iOS 端直接访问其 source 参数中的 CMS API。
+    /// 部分 Android 配置仍包含旧本机代理地址；iOS 端直接访问其 source 参数中的 CMS API。
     static func normalizeSourceAPI(_ value: String, sourceKey: String) -> String {
-        guard sourceKey.caseInsensitiveCompare("kktvs") == .orderedSame,
-              let components = URLComponents(string: value),
+        guard let components = URLComponents(string: value),
               let host = components.host?.lowercased(),
               ["127.0.0.1", "localhost", "::1"].contains(host),
               let source = components.queryItems?.first(where: {
@@ -50,6 +49,9 @@ enum KktvsResponseNormalizer {
     /// 供播放前使用：先处理协议相对地址和播放器页查询参数。
     static func normalizeMediaURL(_ value: String) -> String {
         var url = unescape(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        if url.lowercased().hasPrefix("video://") {
+            url = String(url.dropFirst("video://".count))
+        }
         if url.hasPrefix("//") {
             url = "https:" + url
         }
@@ -60,33 +62,72 @@ enum KktvsResponseNormalizer {
                return name == "url" || name == "play" || name == "playurl"
            })?.value {
             let candidate = unescape(nested.trimmingCharacters(in: .whitespacesAndNewlines))
-            if isHTTPURL(candidate), isDirectMedia(candidate) {
+            if isHTTPURL(candidate) {
                 return candidate
             }
         }
         return url
     }
 
-    /// 从 hxplayer/2mplayer 等播放器页脚本中提取直接媒体地址。
+    static func embeddedMediaURL(in value: String) -> String? {
+        guard let components = URLComponents(string: value),
+              let nested = components.queryItems?.first(where: {
+                  let name = $0.name.lowercased()
+                  return name == "url" || name == "play" || name == "playurl"
+              })?.value else {
+            return nil
+        }
+        var candidate = unescape(nested.trimmingCharacters(in: .whitespacesAndNewlines))
+        if !isHTTPURL(candidate), let decoded = candidate.removingPercentEncoding {
+            candidate = decoded
+        }
+        if candidate.hasPrefix("//") {
+            candidate = "https:" + candidate
+        }
+        return isHTTPURL(candidate) ? candidate : nil
+    }
+
+    static func normalizeMediaURLPreservingWrapper(_ value: String) -> String {
+        let trimmed = unescape(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        return embeddedMediaURL(in: trimmed) == nil ? normalizeMediaURL(trimmed) : trimmed
+    }
+
+    static func isHLSPlaylist(_ response: String) -> Bool {
+        let normalized = response
+            .replacingOccurrences(of: "\u{FEFF}", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.hasPrefix("#EXTM3U")
+    }
+
+    /// 从播放器页脚本中提取媒体地址；无扩展名地址由后续响应体检测确认。
     static func extractMediaURL(from body: String, baseURL: String) -> String? {
         let content = unescape(body)
         let patterns = [
-            #"(?i)[\"'](?:url|playurl|play_url|file|src|video)[\"']\s*:\s*[\"']([^\"']+)[\"']"#,
+            #"(?i)[\"'](?:url|playurl|play_url|file|src|video|videoUrl|vid|source|main|playlist|hls|m3u8|mp4|media)[\"']\s*:\s*[\"']([^\"']+)[\"']"#,
+            #"(?i)\b(?:url|playurl|play_url|file|src|video|videoUrl|vid|source|main|playlist|hls|m3u8|mp4|media)\s*[:=]\s*[\"']([^\"']+)[\"']"#,
             #"(?i)(?:https?:)?//[^\s\"'<>\\]+(?:\.m3u8|\.mp4|\.flv|\.mkv|\.webm|\.mov|\.ts)(?:\?[^\s\"'<>\\]*)?"#
         ]
 
+        var indirectCandidate: String?
         for (index, pattern) in patterns.enumerated() {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
             let range = NSRange(content.startIndex..<content.endIndex, in: content)
             for match in regex.matches(in: content, range: range) {
-                let valueRange = match.numberOfRanges > 1 && index == 0
+                let valueRange = match.numberOfRanges > 1 && index < 2
                     ? match.range(at: 1)
                     : match.range(at: 0)
                 guard let swiftRange = Range(valueRange, in: content) else { continue }
                 var candidate = String(content[swiftRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if let decoded = candidate.removingPercentEncoding {
+                    candidate = decoded
+                }
                 if candidate.hasPrefix("//") {
                     candidate = "https:" + candidate
                 } else if candidate.hasPrefix("/"),
+                          let base = URL(string: baseURL),
+                          let resolved = URL(string: candidate, relativeTo: base)?.absoluteURL {
+                    candidate = resolved.absoluteString
+                } else if !isHTTPURL(candidate),
                           let base = URL(string: baseURL),
                           let resolved = URL(string: candidate, relativeTo: base)?.absoluteURL {
                     candidate = resolved.absoluteString
@@ -95,9 +136,12 @@ enum KktvsResponseNormalizer {
                 if isDirectMedia(candidate) {
                     return candidate
                 }
+                if indirectCandidate == nil, isHTTPURL(candidate) {
+                    indirectCandidate = candidate
+                }
             }
         }
-        return nil
+        return indirectCandidate
     }
 
     static func directMediaURL(_ value: String) -> String? {

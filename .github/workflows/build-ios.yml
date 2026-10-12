@@ -1,10 +1,11 @@
-name: Build CongcongTV iOS IPA
+name: Build CongcongTV iOS IPA (XGZY)
 
 on:
   workflow_dispatch:
   push:
     paths:
       - "tvbox/**"
+      - "Vendor/**"
       - "scripts/**"
       - "project.yml"
       - ".github/workflows/build-ios.yml"
@@ -22,14 +23,294 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate --spec project.yml
 
-      - name: Verify KKT compatibility
+      - name: Verify KKT playback URL normalization
         run: |
-          mkdir -p build
           swiftc -parse-as-library \
-            -o build/verify-kktvs-normalizer \
             tvbox/Services/KktvsResponseNormalizer.swift \
-            scripts/verify-kktvs-normalizer.swift
-          build/verify-kktvs-normalizer
+            scripts/verify-kktvs-normalizer.swift \
+            -o /tmp/verify-kktvs-normalizer
+          /tmp/verify-kktvs-normalizer
+
+      - name: Verify playback route failover
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/PlaybackRouteFailoverPolicy.swift \
+            scripts/verify-playback-route-failover.swift \
+            -o /tmp/verify-playback-route-failover
+          /tmp/verify-playback-route-failover
+
+      - name: Verify source playback request headers
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/CMSRequestHeaderPolicy.swift \
+            tvbox/Models/PlaybackRequestHeaderPolicy.swift \
+            scripts/verify-playback-request-headers.swift \
+            -o /tmp/verify-playback-request-headers
+          /tmp/verify-playback-request-headers
+
+      - name: Verify Android-compatible Jianpian origin discovery
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/JianpianOriginPolicy.swift \
+            scripts/verify-jianpian-origin.swift \
+            -o /tmp/verify-jianpian-origin
+          /tmp/verify-jianpian-origin
+
+      - name: Verify Jianpian home category order
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/MovieSort.swift \
+            tvbox/Models/JianpianHomeCatalog.swift \
+            scripts/verify-jianpian-home.swift \
+            -o /tmp/verify-jianpian-home
+          /tmp/verify-jianpian-home
+
+      - name: Verify bundled default config migration
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/DefaultConfigURLPolicy.swift \
+            scripts/verify-default-config-url.swift \
+            -o /tmp/verify-default-config-url
+          /tmp/verify-default-config-url
+
+      - name: Verify Android-compatible playback line selection
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/PlaybackLineSelectionPolicy.swift \
+            scripts/verify-playback-line-selection.swift \
+            -o /tmp/verify-playback-line-selection
+          /tmp/verify-playback-line-selection
+
+      - name: Verify configured source endpoint fallback
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/SourceEndpointRequestPolicy.swift \
+            scripts/verify-source-endpoint-fallback.swift \
+            -o /tmp/verify-source-endpoint-fallback
+          /tmp/verify-source-endpoint-fallback
+
+      - name: Verify Android-compatible CMS request headers
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/CMSRequestHeaderPolicy.swift \
+            scripts/verify-cms-request-headers.swift \
+            -o /tmp/verify-cms-request-headers
+          /tmp/verify-cms-request-headers
+
+      - name: Verify CMS playback playlist normalization
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/PlaybackPlaylistNormalizer.swift \
+            scripts/verify-playback-playlist-normalizer.swift \
+            -o /tmp/verify-playback-playlist-normalizer
+          /tmp/verify-playback-playlist-normalizer
+
+      - name: Verify M3U8 purification and playback safety
+        run: |
+          swiftc -parse-as-library -framework Network \
+            tvbox/Services/M3U8Purifier.swift \
+            scripts/verify-m3u8-purifier.swift \
+            -o /tmp/verify-m3u8-purifier
+          /tmp/verify-m3u8-purifier
+
+      - name: Verify fixed search source ordering
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/Movie.swift \
+            tvbox/Services/SearchSourceOrdering.swift \
+            scripts/verify-search-source-ordering.swift \
+            -o /tmp/verify-search-source-ordering
+          /tmp/verify-search-source-ordering
+
+      - name: Verify playback playlist parsing
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/Movie.swift \
+            tvbox/Models/VodInfo.swift \
+            scripts/verify-vod-info-playlist.swift \
+            -o /tmp/verify-vod-info-playlist
+          /tmp/verify-vod-info-playlist
+
+      - name: Verify Cz4k search result parsing
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/Movie.swift \
+            tvbox/Services/Cz4kSearchParser.swift \
+            scripts/verify-cz4k-search.swift \
+            -o /tmp/verify-cz4k-search
+          /tmp/verify-cz4k-search
+
+      - name: Verify danmaku episode matching
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Services/DanmakuEpisodeMatcher.swift \
+            scripts/verify-danmaku-episode-matcher.swift \
+            -o /tmp/verify-danmaku-episode-matcher
+          /tmp/verify-danmaku-episode-matcher
+
+      - name: Verify cross-source danmaku cache
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/DanmuCue.swift \
+            tvbox/Models/DanmakuCacheKey.swift \
+            tvbox/Services/DanmakuLocalCache.swift \
+            scripts/verify-danmaku-local-cache.swift \
+            -o /tmp/verify-danmaku-local-cache
+          /tmp/verify-danmaku-local-cache
+
+      - name: Verify danmaku API fallback selection
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/DanmuAPISelectionPolicy.swift \
+            scripts/verify-danmu-api-selection.swift \
+            -o /tmp/verify-danmu-api-selection
+          /tmp/verify-danmu-api-selection
+
+      - name: Verify built-in danmaku match API
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/DanmuMatchRequestPolicy.swift \
+            scripts/verify-danmu-match-api.swift \
+            -o /tmp/verify-danmu-match-api
+          /tmp/verify-danmu-match-api
+
+      - name: Verify danmaku candidate filtering
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/DanmuSearchResult.swift \
+            tvbox/Models/DanmakuCacheKey.swift \
+            tvbox/Services/DanmakuEpisodeMatcher.swift \
+            tvbox/Models/DanmuCandidatePolicy.swift \
+            scripts/verify-danmu-candidate-policy.swift \
+            -o /tmp/verify-danmu-candidate-policy
+          /tmp/verify-danmu-candidate-policy
+
+      - name: Verify persistent home source settings codes
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/HomeSourceSelectionPolicy.swift \
+            scripts/verify-home-source-selection.swift \
+            -o /tmp/verify-home-source-selection
+          /tmp/verify-home-source-selection
+
+      - name: Verify danmaku timeline continuity
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/DanmakuTimelinePolicy.swift \
+            scripts/verify-danmaku-timeline.swift \
+            -o /tmp/verify-danmaku-timeline
+          /tmp/verify-danmaku-timeline
+
+      - name: Verify purified playback startup fallback
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/PlaybackStartupFallbackPolicy.swift \
+            scripts/verify-playback-startup-fallback.swift \
+            -o /tmp/verify-playback-startup-fallback
+          /tmp/verify-playback-startup-fallback
+
+      - name: Verify playback volume button behavior
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/PlaybackVolumeState.swift \
+            scripts/verify-playback-volume.swift \
+            -o /tmp/verify-playback-volume
+          /tmp/verify-playback-volume
+
+      - name: Verify migrated web sources and search suggestions
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Services/MigratedWebSourceService.swift \
+            tvbox/Services/PosterCache.swift \
+            tvbox/Services/SearchSuggestionService.swift \
+            scripts/verify-migrated-web-sources.swift \
+            -o /tmp/verify-migrated-web-sources
+          /tmp/verify-migrated-web-sources
+
+      - name: Verify cross-source poster reuse
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/Movie.swift \
+            tvbox/Services/PosterCache.swift \
+            scripts/verify-poster-reuse.swift \
+            -o /tmp/verify-poster-reuse
+          /tmp/verify-poster-reuse
+
+      - name: Verify Guazi RSA key import and encryption
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Services/GuaziCrypto.swift \
+            scripts/verify-guazi-crypto.swift \
+            -o /tmp/verify-guazi-crypto
+          /tmp/verify-guazi-crypto
+
+      - name: Verify Guazi playback request parameter preservation
+        run: |
+          swiftc \
+            tvbox/Services/GuaziPlaybackRequest.swift \
+            scripts/verify-guazi-playback-request.swift \
+            -o /tmp/verify-guazi-playback-request
+          /tmp/verify-guazi-playback-request
+
+      - name: Verify Guazi loopback HTTP playback route
+        run: |
+          swiftc -parse-as-library -framework Network \
+            tvbox/Services/GuaziPlaybackRequest.swift \
+            tvbox/Services/GuaziPlaybackProxy.swift \
+            scripts/verify-guazi-playback-proxy.swift \
+            -o /tmp/verify-guazi-playback-proxy
+          /tmp/verify-guazi-playback-proxy
+
+      - name: Verify Guazi playback cloud ordering
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Services/GuaziPlaybackCloudOrder.swift \
+            scripts/verify-guazi-playback-cloud-order.swift \
+            -o /tmp/verify-guazi-playback-cloud-order
+          /tmp/verify-guazi-playback-cloud-order
+
+      - name: Verify Guazi categories and metadata parsing
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/MovieSort.swift \
+            tvbox/Services/GuaziHomeCategoryOrder.swift \
+            tvbox/Services/GuaziPlaylistCatalog.swift \
+            tvbox/Services/GuaziMetadataParser.swift \
+            scripts/verify-guazi-metadata.swift \
+            -o /tmp/verify-guazi-metadata
+          /tmp/verify-guazi-metadata
+
+      - name: Verify Guazi search title filtering
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Services/GuaziSearchMatcher.swift \
+            scripts/verify-guazi-search.swift \
+            -o /tmp/verify-guazi-search
+          /tmp/verify-guazi-search
+
+      - name: Verify downloaded media payload validation
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Services/DownloadPayloadValidator.swift \
+            scripts/verify-download-payload.swift \
+            -o /tmp/verify-download-payload
+          /tmp/verify-download-payload
+
+      - name: Verify offline HLS manifest handling
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Services/HLSOfflineManifest.swift \
+            scripts/verify-hls-offline-manifest.swift \
+            -o /tmp/verify-hls-offline-manifest
+          /tmp/verify-hls-offline-manifest
+
+      - name: Verify per-episode playback progress
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Persistence/VodPlaybackState.swift \
+            scripts/verify-playback-progress.swift \
+            -o /tmp/verify-playback-progress
+          /tmp/verify-playback-progress
 
       - name: Build unsigned app
         run: |
@@ -49,25 +330,45 @@ jobs:
       - name: Verify built app metadata and config
         run: |
           python3 - <<'PY'
-          import json
           import plistlib
           from pathlib import Path
+
+          expected_default_url = "bundle://xgzy_config_all.json"
+          config_policy = Path("tvbox/Models/DefaultConfigURLPolicy.swift").read_text(encoding="utf-8")
+          assert expected_default_url in config_policy
+          assert 'legacyURL' in config_policy
+          config_loader = Path("tvbox/Services/ApiConfig.swift").read_text(encoding="utf-8")
+          assert 'hasPrefix("bundle://")' in config_loader
+          assert 'normalized == "bundle://xgzy_config_all.json"' in config_loader
+
+          source_config = Path("tvbox/Resources/xgzy_config_all.json")
+          import json
+          sources = json.loads(source_config.read_text(encoding="utf-8"))["sites"]
+          assert len(sources) == 46
+          assert len({item["key"] for item in sources}) == 46
+          assert all(item["key"] != "yutu" for item in sources)
+          expected_search_sources = {
+              "guazi", "jianpian", "xgzy", "ffzy", "bfzy", "dyttzy",
+              "lzi", "360zy", "fhw88", "cz4k", "fan_moli", "ikanbot", "zanpian",
+          }
+          assert expected_search_sources.issubset({item["key"] for item in sources})
+          assert sources[0]["key"] == "xgzy"
+          assert all(item["type"] == 1 for item in sources)
+          assert next(item for item in sources if item["key"] == "ikunzy")["name"] == "爱坤"
+          assert all("127.0.0.1" not in item["api"] and "localhost" not in item["api"] for item in sources)
 
           app = Path("build/Build/Products/Release-iphoneos/CongcongTV.app")
           with (app / "Info.plist").open("rb") as stream:
               info = plistlib.load(stream)
-          assert info["CFBundleIdentifier"] == "com.congcong.tv.ios"
+          assert info["CFBundleIdentifier"] == "com.congcong.tv.xgzy"
           assert info["CFBundleExecutable"] == "CongcongTV"
           assert info["CFBundlePackageType"] == "APPL"
           assert info["CFBundleDisplayName"] == "CongcongTV"
           assert info["MinimumOSVersion"] == "17.0"
           assert (app / info["CFBundleExecutable"]).is_file()
+          assert (app / "xgzy_config_all.json").is_file()
           assert (app / "zh-Hans.lproj/InfoPlist.strings").is_file()
-          with (app / "movie2_kktvs.json").open(encoding="utf-8") as stream:
-              config = json.load(stream)
-          site = next(site for site in config["sites"] if site["key"] == "kktvs")
-          assert site["api"] == "https://www.kktvs.com/api.php/provide/vod"
-          print("APP METADATA AND CONFIG RESOURCE CHECKS PASSED")
+          print("APP METADATA AND XGZY DEFAULT CONFIG CHECKS PASSED")
           PY
 
       - name: Package unsigned IPA
@@ -80,7 +381,8 @@ jobs:
       - name: Upload IPA and build log
         uses: actions/upload-artifact@v4
         with:
-          name: CongcongTV-unsigned-ipa
+          name: CongcongTV-iOS-unsigned-ipa
           path: |
             CongcongTV-unsigned.ipa
             build.log
+          if-no-files-found: error

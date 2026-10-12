@@ -5,6 +5,7 @@ struct HomeView: View {
     @StateObject private var viewModel = HomeViewModel()
     @EnvironmentObject var appState: AppState
     @State private var categoryScrollAnchorId: String?
+    @State private var contentScrollAnchorId: String?
     
     // 网格布局
     #if os(iOS)
@@ -24,7 +25,9 @@ struct HomeView: View {
                 headerBar
                 
                 // 分类标签栏
-                if !viewModel.sorts.isEmpty {
+                // 冷启动时先保持加载态，等瓜子片单完整排序后再展示标签栏，
+                // 避免临时返回顺序造成随机选中和横向跳动。
+                if !viewModel.sorts.isEmpty && viewModel.selectedSort != nil {
                     categoryTabBar
                 }
                 
@@ -35,49 +38,56 @@ struct HomeView: View {
         }
         .task {
             await viewModel.loadSorts()
-            if let first = viewModel.sorts.first {
-                viewModel.selectSort(first)
+            guard viewModel.categoryVideos.isEmpty,
+                  let selected = viewModel.selectedSort else { return }
+            // 只重试模型已经决定的分类，不在页面生命周期回调中重新选择标签。
+            viewModel.selectSort(selected, userInitiated: false)
+        }
+        .onAppear {
+            viewModel.handleHomeAppearance()
+        }
+        // 去掉了首启配置页后，主页可能先于配置加载完成出现；
+        // 配置就绪后自动拉取分类与首页数据。
+        .onChange(of: appState.isConfigLoaded) { _, loaded in
+            if loaded && viewModel.sorts.isEmpty && viewModel.homeVideos.isEmpty {
+                Task {
+                    await viewModel.loadSorts()
+                    guard viewModel.categoryVideos.isEmpty,
+                          let selected = viewModel.selectedSort else { return }
+                    viewModel.selectSort(selected, userInitiated: false)
+                }
+            }
+        }
+        .onChange(of: appState.sourceRefreshVersion) { _, _ in
+            guard appState.isConfigLoaded else { return }
+            Task {
+                await viewModel.refresh()
             }
         }
     }
     
-    // MARK: - 顶部栏（源选择器）
+    // MARK: - 顶部栏
     
     private var headerBar: some View {
         HStack(spacing: 12) {
-            // 源切换按钮
-            Menu {
-                ForEach(ApiConfig.shared.sourceBeanList.filter { $0.isSupportedInSwift }) { source in
-                    Button {
-                        ApiConfig.shared.setHomeSource(source)
-                        Task { await viewModel.refresh() }
-                    } label: {
-                        HStack {
-                            Text(source.name)
-                            if source.key == ApiConfig.shared.homeSourceBean?.key {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    }
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "play.tv.fill")
-                        .font(.system(size: 14))
-                        .foregroundColor(.orange)
-                    Text(ApiConfig.shared.homeSourceBean?.name ?? CongcongBrand.appName)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(.white)
-                        .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.5))
-                }
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            
+            Text(CongcongBrand.appName)
+                .font(.system(size: 18, weight: .bold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+
             Spacer()
+
+            NavigationLink {
+                SearchView()
+            } label: {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 36, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("搜索")
         }
         .padding(.horizontal, 16)
         .padding(.top, 10)
@@ -175,8 +185,12 @@ struct HomeView: View {
     // MARK: - 内容区
     
     private var contentArea: some View {
-        Group {
-            if viewModel.isLoading && viewModel.categoryVideos.isEmpty && viewModel.homeVideos.isEmpty {
+        let isHome = viewModel.selectedSort?.id == "home"
+        let videos = isHome ? viewModel.homeVideos : viewModel.categoryVideos
+
+        return Group {
+            if (viewModel.selectedSort == nil && viewModel.errorMessage == nil)
+                || (viewModel.isLoading && videos.isEmpty) {
                 VStack {
                     Spacer()
                     ProgressView()
@@ -188,7 +202,7 @@ struct HomeView: View {
                         .padding(.top, 12)
                     Spacer()
                 }
-            } else if let error = viewModel.errorMessage, viewModel.categoryVideos.isEmpty && viewModel.homeVideos.isEmpty {
+            } else if let error = viewModel.errorMessage, videos.isEmpty {
                 VStack(spacing: 12) {
                     Spacer()
                     Image(systemName: "exclamationmark.triangle")
@@ -200,13 +214,6 @@ struct HomeView: View {
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 40)
                     
-                    // 如果是不支持的源类型，显示类型信息
-                    if let source = ApiConfig.shared.homeSourceBean, !source.isSupportedInSwift {
-                        Text("当前源类型: \(source.typeDescription)")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    
                     Button("重试") {
                         Task { await viewModel.refresh() }
                     }
@@ -215,16 +222,13 @@ struct HomeView: View {
                     Spacer()
                 }
             } else {
-                let videos = viewModel.selectedSort?.id == "home"
-                    ? viewModel.homeVideos
-                    : viewModel.categoryVideos
-                
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 16) {
                         ForEach(videos) { video in
                             NavigationLink(value: video) {
                                 VodCardView(video: video)
                             }
+                            .id(video.id)
                             #if os(iOS)
                             .buttonStyle(VodCardPressStyle())
                             #else
@@ -244,6 +248,22 @@ struct HomeView: View {
                             .padding()
                     }
                 }
+                .scrollPosition(id: $contentScrollAnchorId)
+                .onAppear {
+                    restoreContentScrollPosition(sortID: viewModel.selectedSort?.id, videos: videos)
+                }
+                .onChange(of: contentScrollAnchorId) { _, newID in
+                    viewModel.rememberScrollPosition(
+                        videoID: newID,
+                        sortID: viewModel.selectedSort?.id
+                    )
+                }
+                .onChange(of: viewModel.selectedSort?.id) { _, newSortID in
+                    restoreContentScrollPosition(sortID: newSortID, videos: videos)
+                }
+                .onChange(of: videos.map(\.id)) { _, _ in
+                    restoreContentScrollPosition(sortID: viewModel.selectedSort?.id, videos: videos)
+                }
                 .refreshable {
                     await viewModel.refresh()
                 }
@@ -253,5 +273,16 @@ struct HomeView: View {
             DetailView(video: video)
         }
     }
-}
 
+    private func restoreContentScrollPosition(sortID: String?, videos: [Movie.Video]) {
+        let savedID = viewModel.savedScrollPosition(sortID: sortID)
+        let targetID = savedID.flatMap { saved in
+            videos.contains(where: { $0.id == saved }) ? saved : nil
+        }
+        guard contentScrollAnchorId != targetID else { return }
+        Task { @MainActor in
+            await Task.yield()
+            contentScrollAnchorId = targetID
+        }
+    }
+}

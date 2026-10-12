@@ -1,14 +1,17 @@
 import Foundation
 
 @main
-struct KktvsNormalizerSmokeTest {
+struct CmsNormalizerSmokeTest {
     static func main() throws {
         let legacyAPI = "http://127.0.0.1:9978/kktvs?source=https%3A%2F%2Fwww.kktvs.com%2Fapi.php%2Fprovide%2Fvod"
         let directAPI = KktvsResponseNormalizer.normalizeSourceAPI(legacyAPI, sourceKey: "kktvs")
         precondition(directAPI == "https://www.kktvs.com/api.php/provide/vod", "legacy localhost API was not rewritten")
         precondition(
-            KktvsResponseNormalizer.normalizeSourceAPI(legacyAPI, sourceKey: "other") == legacyAPI,
-            "unrelated sources must not be rewritten"
+            KktvsResponseNormalizer.normalizeSourceAPI(
+                "http://127.0.0.1:9978/xgzy?source=https%3A%2F%2Fcaiji.xgzyapi.com%2Fapi.php%2Fprovide%2Fvod%2Ffrom%2Fxiguam3u8%2F",
+                sourceKey: "xgzy"
+            ) == "https://caiji.xgzyapi.com/api.php/provide/vod/from/xiguam3u8/",
+            "xgzy localhost API was not rewritten"
         )
 
         let input = #"{"list":[{"vod_play_from":"2mplayer$$$hxplayer","vod_play_url":"01$https://www.kktvs.com/vod/?url=https%3A%2F%2Fmedia.test%2Ftwo.mp4$$$01$//media.test/one.m3u8","vod_play_server":"two$$$hls"}]}"#
@@ -33,6 +36,65 @@ struct KktvsNormalizerSmokeTest {
             "player page media URL extraction failed"
         )
 
-        print("KKT NORMALIZER SMOKE TESTS PASSED")
+        let sharedPlaybackPage = #"<script>const url = "/20250930/45905_303d834a/index.m3u8?sign=abc123";</script>"#
+        precondition(
+            KktvsResponseNormalizer.extractMediaURL(
+                from: sharedPlaybackPage,
+                baseURL: "https://vip.ffzy-plays.com/share/303d834ae7ba59a8233f9b0bd60998fe"
+            ) == "https://vip.ffzy-plays.com/20250930/45905_303d834a/index.m3u8?sign=abc123",
+            "relative share-page HLS URL was not resolved with its token"
+        )
+
+        let redirectedPlayerPage = #"<script>var player={"url":"../media/index.m3u8?ticket=redirected"};</script>"#
+        precondition(
+            KktvsResponseNormalizer.extractMediaURL(
+                from: redirectedPlayerPage,
+                baseURL: "https://cdn.example/live/player/episode.html"
+            ) == "https://cdn.example/live/media/index.m3u8?ticket=redirected",
+            "relative media URL was not resolved against the redirected player page"
+        )
+
+        let extensionlessPlaylistURL = "https://media.test/live/channel?token=abc"
+        let extensionlessPlayerPage = #"<script>var player={"url":"https://media.test/live/channel?token=abc"};</script>"#
+        precondition(
+            KktvsResponseNormalizer.extractMediaURL(
+                from: extensionlessPlayerPage,
+                baseURL: "https://player.test/watch/1"
+            ) == extensionlessPlaylistURL,
+            "extensionless media URLs were not extracted"
+        )
+        precondition(
+            KktvsResponseNormalizer.normalizeMediaURL(
+                "https://player.test/watch?url=https%3A%2F%2Fmedia.test%2Flive%2Fchannel%3Ftoken%3Dabc"
+            ) == extensionlessPlaylistURL,
+            "extensionless nested media URLs were not unwrapped"
+        )
+        let ffzyWrapperURL = "https://player.ffzy.test/watch?url=https%3A%2F%2Fmedia.ffzy.test%2Findex.m3u8%3Ftoken%3Dabc"
+        precondition(
+            KktvsResponseNormalizer.embeddedMediaURL(in: ffzyWrapperURL)
+                == "https://media.ffzy.test/index.m3u8?token=abc",
+            "FFZY embedded media URL was not extracted"
+        )
+        precondition(
+            KktvsResponseNormalizer.normalizeMediaURLPreservingWrapper(ffzyWrapperURL) == ffzyWrapperURL,
+            "FFZY player page context was not preserved"
+        )
+        precondition(
+            KktvsResponseNormalizer.embeddedMediaURL(
+                in: "https://player.ffzy.test/watch?url=https%253A%252F%252Fmedia.ffzy.test%252Findex.m3u8"
+            ) == "https://media.ffzy.test/index.m3u8",
+            "double-encoded FFZY media URL was not decoded"
+        )
+        precondition(
+            KktvsResponseNormalizer.directMediaURL("video://https://media.test/stream.mpd")
+                == "https://media.test/stream.mpd",
+            "Android video:// wrapper or DASH URL was not normalized"
+        )
+        precondition(
+            KktvsResponseNormalizer.isHLSPlaylist("\u{FEFF}  #EXTM3U\r\n#EXTINF:6.0,\r\nsegment.ts"),
+            "extensionless HLS response was not detected"
+        )
+
+        print("CMS NORMALIZER SMOKE TESTS PASSED")
     }
 }

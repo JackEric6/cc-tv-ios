@@ -1,0 +1,385 @@
+#if os(iOS)
+import SwiftUI
+
+/// 已下载影片列表。播放时直接使用本地文件，不依赖资源站或网络连接。
+struct DownloadsView: View {
+    @StateObject private var downloadManager = DownloadManager.shared
+    @State private var activeItem: DownloadItem?
+    @State private var isEditing = false
+    @State private var selectedIDs = Set<String>()
+    @State private var pendingDeleteIDs = Set<String>()
+    @State private var showingDeleteConfirmation = false
+
+    var body: some View {
+        Group {
+            if downloadManager.allItems().isEmpty {
+                EmptyStateView(
+                    icon: "arrow.down.circle",
+                    title: "暂无离线影片",
+                    message: "在影片详情页点击下载按钮后，可在这里离线观看。"
+                )
+            } else {
+                List {
+                    ForEach(downloadManager.allItems()) { item in
+                        downloadRow(item)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if isEditing {
+                                    toggleSelection(for: item.id)
+                                    return
+                                }
+                                guard item.status == .completed,
+                                      let localURL = downloadManager.localFileURL(identifier: item.id) else {
+                                    return
+                                }
+                                var playableItem = item
+                                playableItem.localURL = localURL
+                                activeItem = playableItem
+                            }
+                            .onLongPressGesture(minimumDuration: 0.45) {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    isEditing = true
+                                    selectedIDs.insert(item.id)
+                                }
+                            }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    requestDelete(ids: [item.id])
+                                } label: {
+                                    Label("删除", systemImage: "trash")
+                                }
+                            }
+                    }
+                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+            }
+        }
+        .background(AppTheme.primaryGradient)
+        .navigationTitle("离线下载")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if !downloadManager.allItems().isEmpty {
+                ToolbarItem(placement: .topBarLeading) {
+                    if isEditing {
+                        Button(selectedIDs.count == downloadManager.allItems().count ? "取消全选" : "全选") {
+                            toggleSelectAll()
+                        }
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(isEditing ? "完成" : "编辑") {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            isEditing.toggle()
+                            if !isEditing { selectedIDs.removeAll() }
+                        }
+                    }
+                }
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if isEditing {
+                Button(role: .destructive) {
+                    requestDelete(ids: selectedIDs)
+                } label: {
+                    Label("删除已选 (\(selectedIDs.count))", systemImage: "trash")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .disabled(selectedIDs.isEmpty)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial)
+            }
+        }
+        .sheet(item: $activeItem) { item in
+            OfflineDownloadPlayerView(item: item)
+        }
+        .alert("确认删除下载内容？", isPresented: $showingDeleteConfirmation) {
+            Button("删除", role: .destructive) {
+                deletePendingItems()
+            }
+            Button("取消", role: .cancel) {
+                pendingDeleteIDs.removeAll()
+            }
+        } message: {
+            Text("删除后将清理本地文件和下载记录，此操作无法撤销。")
+        }
+        .onChange(of: downloadManager.allItems().map(\.id)) { ids in
+            let availableIDs = Set(ids)
+            selectedIDs.formIntersection(availableIDs)
+            pendingDeleteIDs.formIntersection(availableIDs)
+            if ids.isEmpty {
+                isEditing = false
+                selectedIDs.removeAll()
+            }
+        }
+    }
+
+    private func downloadRow(_ item: DownloadItem) -> some View {
+        HStack(spacing: 12) {
+            if isEditing {
+                Image(systemName: selectedIDs.contains(item.id) ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 21, weight: .semibold))
+                    .foregroundColor(selectedIDs.contains(item.id) ? .blue : .white.opacity(0.55))
+                    .accessibilityHidden(true)
+            }
+            Image(systemName: icon(for: item.status))
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundColor(color(for: item.status))
+                .frame(width: 34)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                Text(episodeLabel(item))
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.65))
+                if item.status == .downloading || item.status == .paused {
+                    ProgressView(value: item.progress)
+                        .tint(.blue)
+                    HStack(spacing: 6) {
+                        Text(downloadProgressLabel(item))
+                        Spacer(minLength: 0)
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(downloadSpeedLabel(item))
+                            if let remaining = downloadRemainingTimeLabel(item) {
+                                Text("剩余 \(remaining)")
+                                    .foregroundColor(.white.opacity(0.5))
+                            }
+                        }
+                    }
+                    .font(.caption2.monospacedDigit())
+                    .foregroundColor(.white.opacity(0.62))
+                } else if item.status == .completed, let sizeLabel = downloadSizeLabel(item) {
+                    Text(sizeLabel)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundColor(.white.opacity(0.62))
+                } else if case .failed(let message) = item.status {
+                    Text(message)
+                        .font(.caption2)
+                        .foregroundColor(.red)
+                        .lineLimit(2)
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            if item.status == .completed {
+                Image(systemName: "play.fill")
+                    .foregroundColor(.white.opacity(0.7))
+            } else if item.status == .downloading {
+                HStack(spacing: 10) {
+                    Text("\(Int(item.progress * 100))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundColor(.white.opacity(0.7))
+                    Button {
+                        downloadManager.pause(identifier: item.id)
+                    } label: {
+                        Image(systemName: "pause.fill")
+                            .frame(width: 30, height: 30)
+                    }
+                    .buttonStyle(.borderless)
+                    .tint(.white)
+                    .accessibilityLabel("暂停下载")
+                }
+            } else if item.status == .paused {
+                Button {
+                    downloadManager.resume(identifier: item.id)
+                } label: {
+                    Image(systemName: "play.fill")
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.borderless)
+                .tint(.white)
+                .accessibilityLabel("继续下载")
+            }
+        }
+        .padding(.vertical, 8)
+        .listRowBackground(Color.white.opacity(0.06))
+    }
+
+    private func toggleSelection(for id: String) {
+        if selectedIDs.contains(id) {
+            selectedIDs.remove(id)
+        } else {
+            selectedIDs.insert(id)
+        }
+    }
+
+    private func toggleSelectAll() {
+        let allIDs = Set(downloadManager.allItems().map(\.id))
+        selectedIDs = selectedIDs == allIDs ? [] : allIDs
+    }
+
+    private func requestDelete(ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        pendingDeleteIDs = ids
+        showingDeleteConfirmation = true
+    }
+
+    private func requestDelete(ids: [String]) {
+        requestDelete(ids: Set(ids))
+    }
+
+    private func deletePendingItems() {
+        let ids = pendingDeleteIDs
+        for id in ids {
+            try? downloadManager.delete(identifier: id)
+        }
+        if let activeItem, ids.contains(activeItem.id) {
+            self.activeItem = nil
+        }
+        selectedIDs.removeAll()
+        pendingDeleteIDs.removeAll()
+        isEditing = false
+    }
+
+    private func episodeLabel(_ item: DownloadItem) -> String {
+        let episode = item.episodeName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return episode.isEmpty ? "第\(item.episodeIndex + 1)集 · \(item.sourceKey)" : "\(episode) · \(item.sourceKey)"
+    }
+
+    private func icon(for status: DownloadStatus) -> String {
+        switch status {
+        case .completed: return "checkmark.circle.fill"
+        case .downloading, .queued: return "arrow.down.circle"
+        case .paused: return "pause.circle.fill"
+        case .failed: return "exclamationmark.circle.fill"
+        case .cancelled: return "pause.circle"
+        }
+    }
+
+    private func color(for status: DownloadStatus) -> Color {
+        switch status {
+        case .completed: return .green
+        case .downloading, .queued: return .blue
+        case .paused: return .orange
+        case .failed: return .red
+        case .cancelled: return .gray
+        }
+    }
+
+    private func downloadProgressLabel(_ item: DownloadItem) -> String {
+        let progress = normalizedProgress(item.progress)
+        let percent = "\(Int((progress * 100).rounded()))%"
+        if let total = resolvedTotalBytes(for: item) {
+            let prefix = total.isEstimated ? "预计总大小 " : ""
+            return "\(percent) · \(formatBytes(item.bytesWritten))/\(prefix)\(formatBytes(total.bytes))"
+        }
+        if item.bytesWritten > 0 {
+            return "\(percent) · 已下载 \(formatBytes(item.bytesWritten))"
+        }
+        return percent
+    }
+
+    private func downloadSizeLabel(_ item: DownloadItem) -> String? {
+        guard let total = resolvedTotalBytes(for: item) else { return nil }
+        return total.isEstimated
+            ? "预计总大小 \(formatBytes(total.bytes))"
+            : "文件大小 \(formatBytes(total.bytes))"
+    }
+
+    private func resolvedTotalBytes(for item: DownloadItem) -> (bytes: Int64, isEstimated: Bool)? {
+        if item.totalBytes > 0 {
+            return (item.totalBytes, false)
+        }
+
+        let progress = normalizedProgress(item.progress)
+        guard item.bytesWritten > 0, progress > 0, progress < 1 else {
+            if item.status == .completed, item.bytesWritten > 0 {
+                return (item.bytesWritten, false)
+            }
+            return nil
+        }
+
+        let estimate = Double(item.bytesWritten) / progress
+        guard estimate.isFinite, estimate >= Double(item.bytesWritten), estimate <= Double(Int64.max) else {
+            return nil
+        }
+        return (Int64(estimate.rounded()), true)
+    }
+
+    private func normalizedProgress(_ progress: Double) -> Double {
+        guard progress.isFinite else { return 0 }
+        return min(max(progress, 0), 1)
+    }
+
+    private func downloadSpeedLabel(_ item: DownloadItem) -> String {
+        if item.status == .paused { return "已暂停" }
+        guard item.speedBytesPerSecond > 0 else { return "准备中" }
+        return "\(formatBytes(Int64(item.speedBytesPerSecond)))/秒"
+    }
+
+    private func downloadRemainingTimeLabel(_ item: DownloadItem) -> String? {
+        guard item.status == .downloading,
+              let total = resolvedTotalBytes(for: item)?.bytes,
+              total > item.bytesWritten,
+              item.speedBytesPerSecond.isFinite,
+              item.speedBytesPerSecond > 0 else {
+            return nil
+        }
+        let seconds = Int(ceil(Double(total - item.bytesWritten) / item.speedBytesPerSecond))
+        guard seconds > 0 else { return "即将完成" }
+        let hours = seconds / 3600
+        let minutes = (seconds % 3600) / 60
+        let remainingSeconds = seconds % 60
+        if hours > 0 {
+            return "约\(hours)小时\(String(format: "%02d", minutes))分"
+        }
+        if minutes > 0 {
+            return "约\(minutes)分\(String(format: "%02d", remainingSeconds))秒"
+        }
+        return "约\(remainingSeconds)秒"
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        let value = Double(max(0, bytes))
+        if value >= 1024 * 1024 * 1024 {
+            return String(format: "%.1f GB", value / (1024 * 1024 * 1024))
+        }
+        if value >= 1024 * 1024 {
+            return String(format: "%.1f MB", value / (1024 * 1024))
+        }
+        if value >= 1024 {
+            return String(format: "%.0f KB", value / 1024)
+        }
+        return "\(Int(value)) B"
+    }
+}
+
+private struct OfflineDownloadPlayerView: View {
+    let item: DownloadItem
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                if let localURL = item.localURL,
+                   FileManager.default.fileExists(atPath: localURL.path) {
+                    PlayerView(
+                        urlString: localURL.absoluteString,
+                        onBack: { dismiss() },
+                        danmakuTitle: item.title,
+                        danmakuEpisode: item.episodeName
+                    )
+                    .aspectRatio(16 / 9, contentMode: .fit)
+                } else {
+                    ContentUnavailableView(
+                        "离线文件不可用",
+                        systemImage: "exclamationmark.triangle",
+                        description: Text("请删除该条目后重新下载")
+                    )
+                }
+                Spacer(minLength: 0)
+            }
+            .background(Color.black.ignoresSafeArea())
+            .navigationTitle(item.title)
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+}
+#endif

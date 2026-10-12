@@ -2,6 +2,8 @@ import SwiftUI
 import SwiftData
 #if os(macOS)
 import AppKit
+#elseif os(iOS)
+import UIKit
 #endif
 
 /// 详情页 - 对应 Android 版 DetailActivity
@@ -10,100 +12,166 @@ struct DetailView: View {
     @StateObject private var viewModel = DetailViewModel()
     @StateObject private var sharedSystemController = SystemPlayerSessionController()
     @StateObject private var sharedVLCController = VLCPlayerController()
+    @StateObject private var downloadManager = DownloadManager.shared
+    @ObservedObject private var apiConfig = ApiConfig.shared
     @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showFullScreen = false
-    /// VLC 全屏退出动画期间为 true，防止内联播放器与全屏播放器同时争抢 drawable
-    @State private var isFullScreenDismissing = false
     #if os(macOS)
     @State private var pendingMacWindowFullScreen = false
     #endif
     @State private var lastPersistedProgress: Double = 0
+    @State private var playbackSessionToken = UUID()
+    @State private var didSkipOutroForEpisode = false
+    @State private var markerRevision = 0
     @State private var isCollected = false
-    
+    @State private var showEpisodePicker = false
+    @State private var showDownloadEpisodePicker = false
+    @State private var selectedDownloadEpisodes: Set<Int> = []
+    @State private var downloadToastMessage: String?
+    @State private var downloadToastToken = UUID()
+    @AppStorage("danmu_open") private var isDanmakuEnabled = true
+    #if os(iOS)
+    @State private var isDescriptionExpanded = false
+    #endif
+
     var body: some View {
         ScrollView {
             VStack(spacing: 0) {
                 // 播放器区域
-                if !showFullScreen, !isFullScreenDismissing, viewModel.isPlaying, let url = viewModel.playUrl {
-                    PlayerView(
-                        urlString: url,
-                        startPosition: viewModel.currentPlaybackSeconds(),
-                        onProgressChanged: handlePlaybackProgress,
-                        onPlaybackEnded: playNextEpisodeIfNeeded,
-                        onToggleFullScreen: {
-                            openFullScreenPlayer()
-                        },
-                        canPlayNext: canPlayNextEpisode,
-                        onPlayNext: playNextEpisodeIfNeeded,
-                        systemController: sharedSystemController,
-                        vlcController: sharedVLCController
-                    )
-                        .id("\(viewModel.selectedFlag)-\(viewModel.selectedEpisodeIndex)-\(url)")
-                        .aspectRatio(16/9, contentMode: .fit)
-                        .background(Color.black)
-                        .onTapGesture(count: 2) {
-                            openFullScreenPlayer()
-                        }
+                if shouldShowInlinePlayer {
+                    inlinePlayerSection
                 }
-                
+
                 // 视频信息
                 videoInfoSection
-                    .padding(.horizontal, 20)
-                    .padding(.top, 16)
-                
+                    .padding(.horizontal, 14)
+                    .padding(.top, 10)
+
                 // 线路选择
                 if viewModel.flags.count > 1 {
                     flagSelector
-                        .padding(.horizontal, 20)
-                        .padding(.top, 16)
+                        .padding(.horizontal, 14)
+                        .padding(.top, 10)
                 }
-                
+
                 // 清晰度选择
                 if viewModel.hasQualityChoices {
                     qualitySelector
-                        .padding(.horizontal, 20)
-                        .padding(.top, 16)
+                        .padding(.horizontal, 14)
+                        .padding(.top, 10)
                 }
-                
+
                 // 剧集列表
                 if !viewModel.currentEpisodes.isEmpty {
                     episodeSection
-                        .padding(.top, 16)
-                }
-                
-                // 简介
-                if let info = viewModel.vodInfo, !info.des.isEmpty {
-                    descriptionSection(info.des)
-                        .padding(.horizontal, 20)
-                        .padding(.top, 16)
+                        .padding(.top, 10)
                 }
             }
             .padding(.bottom, 40)
         }
         .background(AppTheme.primaryGradient)
+        #if os(iOS)
+        // 标题只在 16:9 播放器下方显示，避免从导航栏向内容区跳动的中间态。
+        .navigationTitle("")
+        #else
         .navigationTitle(video.name)
+        #endif
         #if os(macOS)
         .toolbar((showFullScreen || pendingMacWindowFullScreen) ? .hidden : .visible, for: .windowToolbar)
         #endif
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
+        .overlay(alignment: .bottom) {
+            if let downloadToastMessage {
+                Text(downloadToastMessage)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(.black.opacity(0.82), in: Capsule())
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 22)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .sheet(isPresented: $showEpisodePicker) {
+            EpisodePickerSheet(
+                episodes: viewModel.currentEpisodes,
+                selectedIndex: viewModel.selectedEpisodeIndex,
+                onSelect: { index in
+                    showEpisodePicker = false
+                    flushPlaybackHistoryBeforeSwitch()
+                    beginPlaybackSession(forEpisodeSwitch: true)
+                    withAnimation {
+                        viewModel.selectEpisode(index: index)
+                    }
+                    saveHistoryForCurrentEpisode()
+                }
+            )
+        }
+        .sheet(isPresented: $showDownloadEpisodePicker) {
+            DownloadEpisodePickerSheet(
+                episodes: viewModel.currentEpisodes,
+                initialSelection: selectedDownloadEpisodes,
+                onConfirm: { indexes in
+                    showDownloadEpisodePicker = false
+                    for index in indexes.sorted() {
+                        startDownload(episodeIndex: index)
+                    }
+                }
+            )
+        }
         .task(id: "\(video.sourceKey)-\(video.id)") {
-            await viewModel.loadDetail(video: video)
-            restorePlaybackFromHistory()
+            let savedPlaybackState = CacheStore.shared.getPlaybackState(
+                vodId: video.id,
+                sourceKey: video.sourceKey,
+                context: modelContext
+            )
+            await viewModel.loadDetail(
+                video: video,
+                preferredPlaybackState: savedPlaybackState,
+                autoplay: true
+            )
+            if let savedPlaybackState {
+                lastPersistedProgress = max(savedPlaybackState.progressSeconds, 0)
+            }
             refreshCollectState()
+        }
+        .onChange(of: viewModel.playUrl) { oldURL, newURL in
+            guard oldURL != newURL, newURL != nil, viewModel.isPlaying else { return }
+            saveHistoryForCurrentEpisode()
         }
         .onDisappear {
             viewModel.commitPlaybackProgressSnapshot()
             persistHistoryIfNeeded(force: true)
+            #if os(macOS)
             showFullScreen = false
-            sharedSystemController.stop()
-            sharedVLCController.stop()
+            #endif
+            if !showFullScreen {
+                sharedSystemController.stop()
+                sharedVLCController.stop()
+            }
             #if os(macOS)
             pendingMacWindowFullScreen = false
             appState.exitPlayerFullScreen()
             #endif
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                Task {
+                    // 仅重试此前明确因网络失败的详情请求；正常播放回到前台时
+                    // 不重建详情和播放器，避免出现短暂黑屏或从头播放。
+                    await viewModel.retryCurrentDetailIfNeeded()
+                }
+                return
+            }
+            viewModel.commitPlaybackProgressSnapshot()
+            persistHistoryIfNeeded(force: true)
         }
         #if os(macOS)
         .overlay {
@@ -111,10 +179,18 @@ struct DetailView: View {
                 FullScreenPlayerView(
                     urlString: url,
                     startPosition: viewModel.currentPlaybackSeconds(),
-                    onProgressChanged: handlePlaybackProgress,
-                    onPlaybackEnded: playNextEpisodeIfNeeded,
+                    onProgressChanged: { [playbackSessionToken] seconds, _ in
+                        handlePlaybackProgress(seconds, sessionToken: playbackSessionToken)
+                    },
+                    onPlaybackEnded: { [playbackSessionToken] in
+                        playNextEpisodeIfNeeded(sessionToken: playbackSessionToken)
+                    },
                     canPlayNext: canPlayNextEpisode,
-                    onPlayNext: playNextEpisodeIfNeeded,
+                    onPlayNext: { [playbackSessionToken] in
+                        playNextEpisodeIfNeeded(sessionToken: playbackSessionToken)
+                    },
+                    danmakuTitle: viewModel.vodInfo?.name ?? video.name,
+                    danmakuEpisode: currentDanmakuEpisode,
                     systemController: sharedSystemController,
                     vlcController: sharedVLCController,
                     onCloseRequested: closeMacFullScreenOverlay
@@ -137,58 +213,200 @@ struct DetailView: View {
             appState.exitPlayerFullScreen()
         }
         #endif
-        #if os(iOS)
-        .fullScreenCover(isPresented: $showFullScreen, onDismiss: {
-            isFullScreenDismissing = false
-        }) {
-            if let url = viewModel.playUrl {
-                FullScreenPlayerView(
-                    urlString: url,
-                    startPosition: viewModel.currentPlaybackSeconds(),
-                    onProgressChanged: handlePlaybackProgress,
-                    onPlaybackEnded: playNextEpisodeIfNeeded,
-                    canPlayNext: canPlayNextEpisode,
-                    onPlayNext: playNextEpisodeIfNeeded,
-                    systemController: sharedSystemController,
-                    vlcController: sharedVLCController,
-                    onCloseRequested: {
-                        isFullScreenDismissing = true
-                        showFullScreen = false
-                    }
-                )
-            }
-        }
+    }
+
+    private var shouldShowInlinePlayer: Bool {
+        #if os(macOS)
+        return !showFullScreen
+        #else
+        // iOS 的 KSPlayer 原生全屏控制器自己负责进入/退出全屏；
+        // 详情页始终保留唯一的播放器实例，避免重建第二个控制器。
+        return true
         #endif
     }
-    
+
+    /// 始终保留固定的 16:9 播放器区域。详情请求和播放地址解析期间只替换
+    /// 内容，不改变布局，这样影片标题从进入页面起就稳定在播放器下方。
+    @ViewBuilder
+    private var inlinePlayerSection: some View {
+        ZStack {
+            Color.black
+            if viewModel.isPlaying, let url = viewModel.playUrl {
+                // 全屏时 KSPlayer 只移动内部 UIView，继续复用同一个播放会话。
+                PlayerView(
+                    urlString: url,
+                    playbackHeaders: viewModel.currentPlaybackHeaders,
+                    startPosition: effectiveStartPosition,
+                    playbackSessionToken: playbackSessionToken,
+                    isResolvingPlayback: viewModel.isResolvingPlaybackURL,
+                    onProgressChanged: { [playbackSessionToken] seconds, _ in
+                        handlePlaybackProgress(seconds, sessionToken: playbackSessionToken)
+                    },
+                    onPlaybackEnded: { [playbackSessionToken] in
+                        playNextEpisodeIfNeeded(sessionToken: playbackSessionToken)
+                    },
+                    onPlaybackFailed: { [playbackSessionToken] in
+                        guard playbackSessionToken == self.playbackSessionToken else { return }
+                        viewModel.recoverFromPlaybackFailure()
+                    },
+                    onToggleFullScreen: inlineFullScreenHandler,
+                    onBack: { dismiss() },
+                    canPlayPrevious: viewModel.selectedEpisodeIndex > 0,
+                    onPlayPrevious: { [playbackSessionToken] in
+                        playPreviousEpisode(sessionToken: playbackSessionToken)
+                    },
+                    canPlayNext: canPlayNextEpisode,
+                    onPlayNext: { [playbackSessionToken] in
+                        playNextEpisodeIfNeeded(sessionToken: playbackSessionToken)
+                    },
+                    canSelectEpisode: viewModel.currentEpisodes.count > 1,
+                    onSelectEpisode: handlePlayerEpisodeSelection,
+                    onMarkIntro: markIntro,
+                    onMarkOutro: markOutro,
+                    onResetIntro: resetIntro,
+                    onResetOutro: resetOutro,
+                    introLabel: introMarkerLabel,
+                    outroLabel: outroMarkerLabel,
+                    danmakuTitle: viewModel.vodInfo?.name ?? video.name,
+                    danmakuEpisode: currentDanmakuEpisode,
+                    displayEpisodeTitle: currentPlayerEpisodeTitle,
+                    danmakuEnabled: isDanmakuEnabled,
+                    onDanmakuEnabledChanged: { isDanmakuEnabled = $0 },
+                    onFullScreenChanged: { showFullScreen = $0 },
+                    systemController: sharedSystemController,
+                    vlcController: sharedVLCController
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay {
+                    if viewModel.isResolvingPlaybackURL {
+                        ProgressView()
+                            .tint(.white)
+                            .allowsHitTesting(false)
+                    }
+                }
+            } else if viewModel.isLoading {
+                ProgressView()
+                    .tint(.white)
+                    .scaleEffect(1.15)
+            } else if viewModel.isResolvingPlaybackURL {
+                ProgressView()
+                    .tint(.white)
+                    .scaleEffect(1.15)
+            } else if let error = viewModel.errorMessage {
+                VStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.75))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .padding(.horizontal, 20)
+                    Button {
+                        Task {
+                            await viewModel.retryCurrentDetailIfNeeded(force: true)
+                        }
+                    } label: {
+                        Label("重试播放", systemImage: "arrow.clockwise")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.orange)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .aspectRatio(16 / 9, contentMode: .fit)
+        .clipped()
+    }
+
+    private var inlineFullScreenHandler: (() -> Void)? {
+        #if os(macOS)
+        return { openFullScreenPlayer() }
+        #else
+        // iOS 使用 KSPlayer 原生全屏按钮和退出手势。
+        return nil
+        #endif
+    }
+
+    private func handlePlayerEpisodeSelection() {
+        #if os(iOS)
+        // KSPlayer 全屏时播放器 UIView 会被移到它自己的全屏控制器；
+        // 从顶层控制器呈现选集，避免底层 SwiftUI sheet 抢占当前转场。
+        if let top = topViewController(), top.presentingViewController != nil {
+            presentFullscreenEpisodePicker(from: top)
+        } else {
+            showEpisodePicker = true
+        }
+        #else
+        showEpisodePicker = true
+        #endif
+    }
+
+    #if os(iOS)
+    private func topViewController(from root: UIViewController? = nil) -> UIViewController? {
+        let root = root ?? UIApplication.shared.connectedScenes
+            .compactMap { scene in
+                (scene as? UIWindowScene)?.windows.first(where: { $0.isKeyWindow })
+            }
+            .first?.rootViewController
+        if let presented = root?.presentedViewController {
+            return topViewController(from: presented)
+        }
+        if let navigation = root as? UINavigationController {
+            return topViewController(from: navigation.visibleViewController)
+        }
+        if let tab = root as? UITabBarController {
+            return topViewController(from: tab.selectedViewController)
+        }
+        return root
+    }
+
+    private func presentFullscreenEpisodePicker(from presenter: UIViewController) {
+        guard viewModel.currentEpisodes.count > 1 else { return }
+        let picker = FullscreenEpisodePickerView(
+            episodes: viewModel.currentEpisodes,
+            selectedIndex: viewModel.selectedEpisodeIndex,
+            onDismiss: { [weak presenter] in
+                presenter?.dismiss(animated: true)
+            },
+            onSelect: { [weak presenter] index in
+                presenter?.dismiss(animated: true) {
+                    flushPlaybackHistoryBeforeSwitch()
+                    beginPlaybackSession(forEpisodeSwitch: true)
+                    withAnimation {
+                        viewModel.selectEpisode(index: index)
+                    }
+                    saveHistoryForCurrentEpisode()
+                }
+            }
+        )
+        let hostingController = UIHostingController(rootView: picker)
+        hostingController.modalPresentationStyle = .overFullScreen
+        hostingController.modalTransitionStyle = .crossDissolve
+        hostingController.view.backgroundColor = .clear
+        presenter.present(hostingController, animated: true)
+    }
+    #endif
+
     // MARK: - 视频信息
-    
+
     #if os(iOS)
     @ViewBuilder
     private var videoInfoSection: some View {
-        VStack(spacing: 16) {
-            // Poster centered, height capped to 30% of screen
-            let posterHeight = UIScreen.main.bounds.height * 0.30
-            CachedAsyncImage(url: URL.posterURL(from: video.pic)) { image in
-                image.resizable().aspectRatio(2/3, contentMode: .fit)
-            } placeholder: {
-                Color.white.opacity(0.05)
-                    .aspectRatio(2/3, contentMode: .fit)
-            }
-            .frame(maxHeight: posterHeight)
-            .clipShape(RoundedRectangle(cornerRadius: AppTheme.cardRadius))
-
-            // Info below poster
-            videoDetails
-
-            // Action buttons with 48pt height
-            HStack(spacing: 12) {
-                playButton
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .top, spacing: 10) {
+                videoDetails
+                Spacer(minLength: 0)
+                downloadButton
                 collectButton
             }
-            .frame(minHeight: 48)
+
+            if let info = viewModel.vodInfo, !info.des.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                descriptionSection(info.des)
+            }
         }
-        .padding(15)
+        .padding(12)
         .glassCard(cornerRadius: AppTheme.glassRadius)
     }
     #else
@@ -196,9 +414,9 @@ struct DetailView: View {
     private var videoInfoSection: some View {
         HStack(alignment: .top, spacing: 20) {
             videoPoster
-            
+
             videoDetails
-            
+
             Spacer()
         }
         .padding(15)
@@ -208,7 +426,7 @@ struct DetailView: View {
 
     @ViewBuilder
     private var videoPoster: some View {
-        CachedAsyncImage(url: URL.posterURL(from: video.pic)) { image in
+        CachedAsyncImage(url: URL.posterURL(from: displayPoster)) { image in
             image.resizable().aspectRatio(2/3, contentMode: .fill)
         } placeholder: {
             ZStack {
@@ -225,12 +443,32 @@ struct DetailView: View {
     @ViewBuilder
     private var videoDetails: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(viewModel.vodInfo?.name ?? video.name)
-                .font(.system(size: 24, weight: .bold))
+            Text(displayName)
+                .font(.system(size: 20, weight: .bold))
                 .foregroundColor(.white)
-            
+                .lineLimit(2)
+
+            if !sourceName.isEmpty {
+                HStack(spacing: 5) {
+                    Image(systemName: "server.rack")
+                    Text("来自：\(sourceName)")
+                }
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(.white.opacity(0.72))
+            }
+
+            if !displayRating.isEmpty {
+                HStack(spacing: 5) {
+                    Image(systemName: "star.fill")
+                        .foregroundColor(.yellow)
+                    Text(displayRating)
+                        .foregroundColor(.yellow)
+                }
+                .font(.system(size: 14, weight: .semibold))
+            }
+
             if let info = viewModel.vodInfo {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 3) {
                     infoRow("年份", info.year)
                     infoRow("地区", info.area)
                     infoRow("类型", info.typeName)
@@ -238,10 +476,10 @@ struct DetailView: View {
                     infoRow("演员", info.actor)
                 }
             }
-            
+
             #if os(macOS)
             Spacer(minLength: 10)
-            
+
             HStack(spacing: 10) {
                 playButton
                 collectButton
@@ -250,10 +488,49 @@ struct DetailView: View {
         }
     }
 
+    private var displayName: String {
+        let enrichedName = viewModel.vodInfo?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return enrichedName.isEmpty ? video.name : enrichedName
+    }
+
+    private var sourceName: String {
+        let sourceKey = video.sourceKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sourceKey.isEmpty,
+              let source = apiConfig.getSource(key: sourceKey) else {
+            return ""
+        }
+        let configuredName = source.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if SearchSourceGroup.classify(sourceKey: sourceKey, sourceName: configuredName) == .tiantang {
+            return "天堂"
+        }
+        return configuredName
+    }
+
+    private var displayPoster: String {
+        // 优先使用跨源海报缓存，避免当前播放源（尤其暴风源）的失效 vod_pic
+        // 覆盖搜索阶段已经确认可用的同名海报。仅替换展示图片，不改变播放源或影片 ID。
+        if !PosterCache.isGuaziSource(video.sourceKey) {
+            for title in [displayName, video.name] {
+                if let cached = PosterCache.cachedPoster(for: title, sourceKey: video.sourceKey) {
+                    return cached
+                }
+            }
+        }
+        let enrichedPoster = viewModel.vodInfo?.pic.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return enrichedPoster.isEmpty ? video.pic : enrichedPoster
+    }
+
+    private var displayRating: String {
+        let enrichedRating = viewModel.vodInfo?.doubanRating ?? ""
+        let formattedEnrichedRating = Movie.Video.formatDoubanRating(enrichedRating)
+        return formattedEnrichedRating.isEmpty ? video.formattedDoubanRating : formattedEnrichedRating
+    }
+
     @ViewBuilder
     private var playButton: some View {
         if !viewModel.isPlaying && viewModel.vodInfo != nil {
             Button {
+                beginPlaybackSession()
                 viewModel.selectEpisode(index: 0)
                 saveHistoryForCurrentEpisode()
             } label: {
@@ -272,7 +549,7 @@ struct DetailView: View {
             .buttonStyle(.plain)
         }
     }
-    
+
     private var collectButton: some View {
         Button {
             toggleCollect()
@@ -302,7 +579,151 @@ struct DetailView: View {
         }
         .buttonStyle(.plain)
     }
-    
+
+    private var currentDownloadIdentifier: String {
+        DownloadRequest.identifier(
+            sourceKey: video.sourceKey,
+            videoID: video.id,
+            episodeIndex: viewModel.selectedEpisodeIndex
+        )
+    }
+
+    @ViewBuilder
+    private var downloadButton: some View {
+        let item = downloadManager.item(identifier: currentDownloadIdentifier)
+        Button {
+            requestDownload()
+        } label: {
+            Image(systemName: downloadIcon(for: item?.status))
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(item?.status == .completed ? .green : .white)
+                .frame(width: 42, height: 42)
+                .background(Color.white.opacity(0.08))
+                .clipShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(downloadAccessibilityLabel(for: item?.status))
+        .disabled(item?.status == .downloading || viewModel.currentEpisodes.isEmpty)
+    }
+
+    private func downloadIcon(for status: DownloadStatus?) -> String {
+        switch status {
+        case .completed: return "checkmark"
+        case .downloading, .queued: return "arrow.down.circle"
+        case .paused: return "play.circle"
+        case .failed: return "arrow.clockwise"
+        case .cancelled, .none: return "arrow.down.circle"
+        }
+    }
+
+    private func downloadAccessibilityLabel(for status: DownloadStatus?) -> String {
+        switch status {
+        case .completed: return "已下载"
+        case .downloading, .queued: return "正在下载"
+        case .paused: return "继续下载"
+        case .failed: return "重新下载"
+        case .cancelled, .none: return "下载当前集"
+        }
+    }
+
+    private func requestDownload() {
+        guard !viewModel.currentEpisodes.isEmpty else {
+            showDownloadToast("当前线路没有可下载的剧集")
+            return
+        }
+        if downloadManager.item(identifier: currentDownloadIdentifier)?.status == .paused {
+            downloadManager.resume(identifier: currentDownloadIdentifier)
+            showDownloadToast("已加入下载队列")
+            return
+        }
+        if viewModel.currentEpisodes.count > 1 {
+            selectedDownloadEpisodes = [viewModel.selectedEpisodeIndex]
+            showDownloadEpisodePicker = true
+        } else {
+            startDownload(episodeIndex: viewModel.selectedEpisodeIndex)
+        }
+    }
+
+    private func startDownload(episodeIndex: Int) {
+        guard viewModel.currentEpisodes.indices.contains(episodeIndex) else {
+            showDownloadToast("选择的剧集不存在")
+            return
+        }
+
+        let title = displayName.isEmpty ? video.name : displayName
+        let episodeName = viewModel.currentEpisodes[episodeIndex].name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let sourceKey = video.sourceKey
+        let videoID = video.id
+        let currentIndex = viewModel.selectedEpisodeIndex
+        let episodeURL = viewModel.currentEpisodes[episodeIndex].url
+        // 瓜子播放地址带有短时令牌；下载时必须从虚拟 PlayRequest
+        // 重新换取地址，不能复用播放器已经打开过的旧 CDN URL。
+        let isGuazi = sourceKey.caseInsensitiveCompare("guazi") == .orderedSame
+        let guaziPlayRequest = isGuazi ? GuaziService.PlayRequest(url: episodeURL) : nil
+        let currentURL = !isGuazi && episodeIndex == currentIndex ? viewModel.currentResolvedMediaURL : nil
+
+        Task { @MainActor in
+            let rawURL: String?
+            if let guaziPlayRequest {
+                rawURL = guaziPlayRequest.url
+            } else if let currentURL {
+                rawURL = currentURL
+            } else {
+                rawURL = await viewModel.resolvedPlayableURL(for: episodeIndex)
+            }
+            guard let rawURL,
+                  let url = URL(string: rawURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+                showDownloadToast("该集没有解析到可下载地址，请先切换到可播放线路后重试")
+                return
+            }
+            let requestHeaders = isGuazi
+                ? GuaziPlaybackRequest.playbackHeaders
+                : viewModel.playbackHeaders(forPlayableURL: rawURL)
+
+            let identifier = DownloadRequest.identifier(
+                sourceKey: sourceKey,
+                videoID: videoID,
+                episodeIndex: episodeIndex
+            )
+            let request = DownloadRequest(
+                identifier: identifier,
+                title: title,
+                sourceKey: sourceKey,
+                videoID: videoID,
+                episodeIndex: episodeIndex,
+                episodeName: episodeName,
+                url: url,
+                playRequestURL: guaziPlayRequest.flatMap { URL(string: $0.url) },
+                headers: requestHeaders
+            )
+
+            do {
+                _ = try downloadManager.start(request)
+                showDownloadToast("已加入下载队列")
+            } catch {
+                showDownloadToast(error.localizedDescription)
+            }
+        }
+    }
+
+    /// 下载操作使用短暂提示，避免系统弹窗打断详情页操作。
+    private func showDownloadToast(_ message: String) {
+        let token = UUID()
+        downloadToastToken = token
+        withAnimation(.easeInOut(duration: 0.2)) {
+            downloadToastMessage = message
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+            guard downloadToastToken == token else { return }
+            withAnimation(.easeInOut(duration: 0.2)) {
+                downloadToastMessage = nil
+            }
+        }
+    }
+
     @ViewBuilder
     private func infoRow(_ label: String, _ value: String) -> some View {
         if !value.isEmpty {
@@ -318,16 +739,16 @@ struct DetailView: View {
             }
         }
     }
-    
+
     // MARK: - 线路选择
-    
+
     @ViewBuilder
     private var flagSelector: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("播放线路")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundColor(.white)
-            
+
             flagScrollView
         }
         .padding(15)
@@ -348,6 +769,8 @@ struct DetailView: View {
     @ViewBuilder
     private func flagButton(_ flag: String) -> some View {
         Button {
+            flushPlaybackHistoryBeforeSwitch()
+            beginPlaybackSession()
             withAnimation {
                 viewModel.selectFlag(flag)
             }
@@ -373,16 +796,16 @@ struct DetailView: View {
         }
         .buttonStyle(.plain)
     }
-    
+
     // MARK: - 清晰度选择
-    
+
     @ViewBuilder
     private var qualitySelector: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("视频清晰度")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundColor(.white)
-            
+
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     ForEach(viewModel.qualityOptions) { option in
@@ -394,10 +817,12 @@ struct DetailView: View {
         .padding(15)
         .glassCard(cornerRadius: AppTheme.glassRadius)
     }
-    
+
     @ViewBuilder
     private func qualityButton(_ option: PlaybackQualityOption) -> some View {
         Button {
+            flushPlaybackHistoryBeforeSwitch()
+            beginPlaybackSession()
             withAnimation {
                 viewModel.selectQuality(option)
             }
@@ -423,20 +848,22 @@ struct DetailView: View {
         }
         .buttonStyle(.plain)
     }
-    
+
     // MARK: - 剧集列表
-    
+
     private var episodeSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("选集播放")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundColor(.white)
                 .padding(.horizontal, 20)
-            
+
             EpisodeListView(
                 episodes: viewModel.currentEpisodes,
                 selectedIndex: viewModel.selectedEpisodeIndex,
                 onSelect: { index in
+                    flushPlaybackHistoryBeforeSwitch()
+                    beginPlaybackSession(forEpisodeSwitch: true)
                     withAnimation {
                         viewModel.selectEpisode(index: index)
                     }
@@ -445,81 +872,240 @@ struct DetailView: View {
             )
         }
     }
-    
+
     // MARK: - 简介
-    
+
     private func descriptionSection(_ des: String) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("影片简介")
-                .font(.system(size: 16, weight: .bold))
-                .foregroundColor(.white)
-            
-            Text(des)
-                .font(.system(size: 14))
-                .foregroundColor(.white.opacity(0.6))
-                .lineSpacing(4)
+        let cleanedDescription = normalizedDescription(des)
+
+        return VStack(alignment: .leading, spacing: 12) {
+            Button {
+                #if os(iOS)
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isDescriptionExpanded.toggle()
+                }
+                #endif
+            } label: {
+                HStack {
+                    Text("影片简介")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(.white)
+                    Spacer()
+                    #if os(iOS)
+                    Image(systemName: isDescriptionExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.white.opacity(0.65))
+                    #endif
+                }
+            }
+            .buttonStyle(.plain)
+
+            Text(cleanedDescription)
+                .font(.system(size: 13))
+                .foregroundColor(.white.opacity(0.68))
+                .lineSpacing(3)
+                #if os(iOS)
+                .lineLimit(isDescriptionExpanded ? nil : 2)
+                #else
                 .lineLimit(nil)
+                #endif
         }
-        .padding(15)
-        .glassCard(cornerRadius: AppTheme.glassRadius)
+        .padding(.top, 2)
+    }
+
+    /// 清理资源站简介中的 HTML 空白实体和不可见空白，避免界面出现 "nbsp" 前缀。
+    private func normalizedDescription(_ value: String) -> String {
+        let decoded = value
+            .replacingOccurrences(of: "&nbsp;", with: " ", options: .caseInsensitive)
+            .replacingOccurrences(of: "&#160;", with: " ", options: .caseInsensitive)
+            .replacingOccurrences(of: "\\u00a0", with: " ", options: .caseInsensitive)
+            .replacingOccurrences(of: "nbsp", with: " ", options: .caseInsensitive)
+
+        return decoded
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private var canPlayNextEpisode: Bool {
         viewModel.selectedEpisodeIndex + 1 < viewModel.currentEpisodes.count
     }
-    
+
+    private var playbackMarkerKey: String {
+        let title = (viewModel.vodInfo?.name ?? video.name)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+            .lowercased()
+        let normalized = title.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }.map(String.init).joined()
+        return normalized.isEmpty ? video.id : normalized
+    }
+
+    private var introMarker: Double {
+        UserDefaults.standard.double(forKey: "congcong.playback.intro.\(playbackMarkerKey)")
+    }
+
+    private var introMarkerLabel: String {
+        _ = markerRevision
+        return introMarker > 0 ? "片头 \(Int(introMarker).durationString)" : "片头"
+    }
+
+    private var outroMarker: Double {
+        UserDefaults.standard.double(forKey: "congcong.playback.outro.\(playbackMarkerKey)")
+    }
+
+    private var outroMarkerLabel: String {
+        _ = markerRevision
+        return outroMarker > 0 ? "片尾 \(Int(outroMarker).durationString)" : "片尾"
+    }
+
+    private var effectiveStartPosition: Double {
+        let saved = max(viewModel.currentPlaybackSeconds(), 0)
+        guard saved <= 0.5 else { return saved }
+        return max(0, introMarker)
+    }
+
+    private func markIntro() {
+        let position = max(viewModel.currentPlaybackSeconds(), 0)
+        guard position.isFinite else { return }
+        UserDefaults.standard.set(position, forKey: "congcong.playback.intro.\(playbackMarkerKey)")
+        markerRevision += 1
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    private func markOutro() {
+        let position = max(viewModel.currentPlaybackSeconds(), 0)
+        guard position.isFinite, position > 0 else { return }
+        UserDefaults.standard.set(position, forKey: "congcong.playback.outro.\(playbackMarkerKey)")
+        markerRevision += 1
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        if canPlayNextEpisode {
+            playNextEpisodeIfNeeded(sessionToken: playbackSessionToken)
+        } else {
+            didSkipOutroForEpisode = true
+        }
+    }
+
+    private func resetIntro() {
+        UserDefaults.standard.removeObject(forKey: "congcong.playback.intro.\(playbackMarkerKey)")
+        markerRevision += 1
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    private func resetOutro() {
+        UserDefaults.standard.removeObject(forKey: "congcong.playback.outro.\(playbackMarkerKey)")
+        markerRevision += 1
+        didSkipOutroForEpisode = false
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    private var currentDanmakuEpisode: String {
+        guard viewModel.selectedEpisodeIndex >= 0,
+              viewModel.selectedEpisodeIndex < viewModel.currentEpisodes.count else {
+            return "第\(viewModel.selectedEpisodeIndex + 1)集"
+        }
+        let name = viewModel.currentEpisodes[viewModel.selectedEpisodeIndex].name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? "第\(viewModel.selectedEpisodeIndex + 1)集" : name
+    }
+
+    private var currentPlayerEpisodeTitle: String {
+        guard viewModel.currentEpisodes.count > 1,
+              viewModel.selectedEpisodeIndex >= 0,
+              viewModel.selectedEpisodeIndex < viewModel.currentEpisodes.count else {
+            return ""
+        }
+        return "第\(viewModel.selectedEpisodeIndex + 1)集"
+    }
+
     private func saveHistoryForCurrentEpisode(progressOverride: Double? = nil) {
         let episodeName = viewModel.vodInfo?.currentEpisode?.name.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let episodeLabel = episodeName.isEmpty ? "第\(viewModel.selectedEpisodeIndex + 1)集" : episodeName
-        let progress = max(progressOverride ?? viewModel.currentPlaybackSeconds(), 0)
+        let progress = VodPlaybackState.normalizedProgress(
+            progressOverride ?? viewModel.currentPlaybackSeconds()
+        )
         let timeLabel = progress > 0 ? Int(progress).durationString : ""
         let playNote = timeLabel.isEmpty ? episodeLabel : "\(episodeLabel) \(timeLabel)"
-        
-        let playbackState = VodPlaybackState(
-            flag: viewModel.selectedFlag,
-            episodeIndex: viewModel.selectedEpisodeIndex,
-            progressSeconds: progress
+
+        let playbackState = viewModel.playbackState(progressOverride: progress)
+
+        // CacheStore 的写入方法本身运行在 MainActor，同步写入可避免异步任务乱序覆盖最新进度。
+        CacheStore.shared.addRecord(
+            video,
+            playNote: playNote,
+            playbackState: playbackState,
+            context: modelContext
         )
-        
-        Task { @MainActor in
-            CacheStore.shared.addRecord(
-                video,
-                playNote: playNote,
-                playbackState: playbackState,
-                context: modelContext
-            )
+    }
+
+    private func handlePlaybackProgress(_ seconds: Double, sessionToken: UUID? = nil) {
+        if let sessionToken, sessionToken != playbackSessionToken {
+            return
         }
-    }
-    
-    private func handlePlaybackProgress(_ seconds: Double, _: Double?) {
         viewModel.updatePlaybackProgress(seconds: seconds)
-        persistHistoryIfNeeded(force: false, currentProgress: seconds)
+        if !didSkipOutroForEpisode,
+           outroMarker > 0,
+           seconds >= outroMarker,
+           canPlayNextEpisode {
+            didSkipOutroForEpisode = true
+            flushPlaybackHistoryBeforeSwitch()
+            beginPlaybackSession(forEpisodeSwitch: true)
+            viewModel.selectEpisode(index: viewModel.selectedEpisodeIndex + 1)
+            return
+        }
+        // 使用 ViewModel 接受后的进度保存。播放器启动续播时可能先回调 0，
+        // 此时 ViewModel 会暂时保留已恢复位置，不能把原记录覆盖成 0。
+        persistHistoryIfNeeded(force: false, currentProgress: viewModel.currentPlaybackSeconds())
     }
-    
+
     private func persistHistoryIfNeeded(force: Bool, currentProgress: Double? = nil) {
-        guard viewModel.isPlaying else { return }
+        // 页面消失或进入后台时，播放器的播放态可能已被系统暂停，
+        // 但仍有有效的详情/播放会话需要保存，不能仅依赖 isPlaying。
+        guard viewModel.vodInfo != nil, viewModel.playUrl != nil else { return }
         let progress = max(currentProgress ?? viewModel.currentPlaybackSeconds(), 0)
         guard progress.isFinite else { return }
-        
+
         if !force && abs(progress - lastPersistedProgress) < 20 {
             return
         }
-        
+
         lastPersistedProgress = progress
         saveHistoryForCurrentEpisode(progressOverride: progress)
     }
-    
+
+    /// 开始新的线路/剧集播放会话，令旧播放器回调失效，并重新计算本集的持久化阈值。
+    private func beginPlaybackSession(forEpisodeSwitch: Bool = false) {
+        if forEpisodeSwitch {
+            NotificationCenter.default.post(
+                name: .congcongPlaybackSessionWillChange,
+                object: nil,
+                userInfo: ["sessionToken": playbackSessionToken]
+            )
+        }
+        playbackSessionToken = UUID()
+        lastPersistedProgress = 0
+        didSkipOutroForEpisode = false
+    }
+
+    /// 在切换线路或剧集前，先把旧播放器会话的最新位置落盘，避免短会话丢失进度。
+    private func flushPlaybackHistoryBeforeSwitch() {
+        viewModel.commitPlaybackProgressSnapshot()
+        persistHistoryIfNeeded(force: true)
+    }
+
     private func restorePlaybackFromHistory() {
         guard let playbackState = CacheStore.shared.getPlaybackState(
             vodId: video.id,
             sourceKey: video.sourceKey,
             context: modelContext
         ) else { return }
-        
+
         viewModel.applyPlaybackState(playbackState)
-        lastPersistedProgress = max(playbackState.progressSeconds, 0)
+        lastPersistedProgress = playbackState.progress(
+            for: playbackState.flag,
+            episodeIndex: playbackState.episodeIndex
+        )
     }
-    
+
     private func refreshCollectState() {
         isCollected = CacheStore.shared.isCollected(
             vodId: video.id,
@@ -527,7 +1113,7 @@ struct DetailView: View {
             context: modelContext
         )
     }
-    
+
     private func toggleCollect() {
         if isCollected {
             CacheStore.shared.removeCollect(
@@ -540,39 +1126,53 @@ struct DetailView: View {
         }
         refreshCollectState()
     }
-    
-    private func playNextEpisodeIfNeeded() {
+
+    private func playNextEpisodeIfNeeded(sessionToken: UUID? = nil) {
+        guard sessionToken == nil || sessionToken == playbackSessionToken else { return }
+        flushPlaybackHistoryBeforeSwitch()
+        guard canPlayNextEpisode else { return }
+        beginPlaybackSession(forEpisodeSwitch: true)
         var moved = false
         withAnimation {
             moved = viewModel.playNext()
         }
-        
+
         if moved {
             saveHistoryForCurrentEpisode()
         }
     }
-    
+
+    private func playPreviousEpisode(sessionToken: UUID? = nil) {
+        guard sessionToken == nil || sessionToken == playbackSessionToken else { return }
+        flushPlaybackHistoryBeforeSwitch()
+        guard viewModel.selectedEpisodeIndex > 0 else { return }
+        beginPlaybackSession(forEpisodeSwitch: true)
+        var moved = false
+        withAnimation {
+            moved = viewModel.playPrevious()
+        }
+        if moved {
+            saveHistoryForCurrentEpisode()
+        }
+    }
+
+    #if os(macOS)
     private func openFullScreenPlayer() {
-        #if os(iOS)
-        showFullScreen = true
-        #else
         guard viewModel.playUrl != nil else { return }
         appState.enterPlayerFullScreen()
-        
+
         if let window = NSApp.keyWindow ?? NSApp.mainWindow,
            window.styleMask.contains(.fullScreen) {
             showFullScreen = true
             return
         }
-        
+
         pendingMacWindowFullScreen = requestMacWindowFullScreen(enter: true)
         if !pendingMacWindowFullScreen {
             showFullScreen = true
         }
-        #endif
     }
-    
-    #if os(macOS)
+
     @discardableResult
     private func requestMacWindowFullScreen(enter: Bool) -> Bool {
         guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return false }
@@ -581,7 +1181,7 @@ struct DetailView: View {
         window.toggleFullScreen(nil)
         return true
     }
-    
+
     private func closeMacFullScreenOverlay() {
         pendingMacWindowFullScreen = false
         let window = NSApp.keyWindow ?? NSApp.mainWindow
@@ -595,9 +1195,131 @@ struct DetailView: View {
     #endif
 }
 
+private struct EpisodePickerSheet: View {
+    let episodes: [VodInfo.Episode]
+    let selectedIndex: Int
+    let onSelect: (Int) -> Void
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                EpisodeListView(
+                    episodes: episodes,
+                    selectedIndex: selectedIndex,
+                    onSelect: onSelect
+                )
+                .padding(.top, 12)
+            }
+            .navigationTitle("选集")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            .presentationDetents([.medium, .large])
+            #endif
+        }
+    }
+}
+
+private struct DownloadEpisodePickerSheet: View {
+    let episodes: [VodInfo.Episode]
+    let initialSelection: Set<Int>
+    let onConfirm: (Set<Int>) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedIndices: Set<Int>
+    private let gridColumns = [GridItem(.adaptive(minimum: 60, maximum: 96), spacing: 10)]
+
+    init(
+        episodes: [VodInfo.Episode],
+        initialSelection: Set<Int>,
+        onConfirm: @escaping (Set<Int>) -> Void
+    ) {
+        self.episodes = episodes
+        self.initialSelection = initialSelection
+        self.onConfirm = onConfirm
+        _selectedIndices = State(initialValue: Set(initialSelection.filter { episodes.indices.contains($0) }))
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 16) {
+                    HStack {
+                        Button(selectedIndices.count == episodes.count ? "取消全选" : "全选") {
+                            if selectedIndices.count == episodes.count {
+                                selectedIndices.removeAll()
+                            } else {
+                                selectedIndices = Set(episodes.indices)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(.accentColor)
+
+                        Spacer()
+
+                        Text("已选 \(selectedIndices.count) 集")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    LazyVGrid(columns: gridColumns, spacing: 10) {
+                        ForEach(Array(episodes.enumerated()), id: \.offset) { index, _ in
+                        Button {
+                            if selectedIndices.contains(index) {
+                                selectedIndices.remove(index)
+                            } else {
+                                selectedIndices.insert(index)
+                            }
+                        } label: {
+                            ZStack(alignment: .topTrailing) {
+                                Text("\(index + 1)")
+                                    .font(.system(size: 16, weight: .semibold, design: .rounded))
+                                    .foregroundColor(selectedIndices.contains(index) ? .white : .primary)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                                if selectedIndices.contains(index) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(.white.opacity(0.9))
+                                        .padding(5)
+                                }
+                            }
+                            .frame(height: 44)
+                            .background(selectedIndices.contains(index) ? Color.accentColor : Color.secondary.opacity(0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 16)
+                .padding(.bottom, 24)
+            }
+            .navigationTitle("选择下载剧集")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            .presentationDetents([.medium, .large])
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("开始下载") {
+                        onConfirm(selectedIndices)
+                    }
+                    .disabled(selectedIndices.isEmpty)
+                }
+            }
+        }
+    }
+
+}
+
 /// 全屏播放器
 struct FullScreenPlayerView: View {
     let urlString: String
+    var danmakuTitle: String = ""
+    var danmakuEpisode: String = ""
     var startPosition: Double = 0
     var onProgressChanged: ((Double, Double?) -> Void)? = nil
     var onPlaybackEnded: (() -> Void)? = nil
@@ -607,11 +1329,11 @@ struct FullScreenPlayerView: View {
     var vlcController: VLCPlayerController? = nil
     var onCloseRequested: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
-    
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            
+
             PlayerView(
                 urlString: urlString,
                 startPosition: startPosition,
@@ -624,13 +1346,16 @@ struct FullScreenPlayerView: View {
                         dismiss()
                     }
                 },
+                onBack: onCloseRequested,
                 canPlayNext: canPlayNext,
                 onPlayNext: onPlayNext,
+                danmakuTitle: danmakuTitle,
+                danmakuEpisode: danmakuEpisode,
                 systemController: systemController,
                 vlcController: vlcController
             )
                 .ignoresSafeArea()
-            
+
             VStack {
                 HStack {
                     Button {
@@ -650,5 +1375,11 @@ struct FullScreenPlayerView: View {
                 Spacer()
             }
         }
+        #if os(iOS)
+        // 保留系统状态栏与 Home 指示条；KSPlayer 原生全屏控制器负责
+        // 根据 maskShow 更新状态栏可见性，避免时间/电量被 SwiftUI 包装层吞掉。
+        .statusBarHidden(false)
+        .persistentSystemOverlays(.visible)
+        #endif
     }
 }

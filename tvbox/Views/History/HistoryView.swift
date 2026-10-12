@@ -12,7 +12,7 @@ struct HistoryView: View {
     #if os(iOS)
     /// iOS 网格配置。
     private let columns = [
-        GridItem(.adaptive(minimum: 120, maximum: 160), spacing: 12)
+        GridItem(.adaptive(minimum: 100, maximum: 132), spacing: 10)
     ]
     #else
     /// macOS 网格配置。
@@ -34,7 +34,7 @@ struct HistoryView: View {
                 emptyState
             } else {
                 ScrollView {
-                    LazyVGrid(columns: columns, spacing: 16) {
+                    LazyVGrid(columns: columns, spacing: 12) {
                         // 记录卡片支持跳转详情与右键删除。
                         ForEach(records) { item in
                             NavigationLink(destination: DetailView(video: movieVideo(from: item))) {
@@ -55,7 +55,7 @@ struct HistoryView: View {
                             }
                         }
                     }
-                    .padding(.horizontal, 20)
+                    .padding(.horizontal, 16)
                     .padding(.vertical, 12)
                 }
             }
@@ -80,6 +80,9 @@ struct HistoryView: View {
                 }
             }
         }
+        .task {
+            CacheStore.shared.deduplicateHistory(context: modelContext)
+        }
     }
     
     /// 无历史时的占位视图。
@@ -97,7 +100,7 @@ struct HistoryView: View {
     private func recordCard(_ item: VodRecord) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack(alignment: .bottomLeading) {
-                CachedAsyncImage(url: URL.posterURL(from: item.vodPic)) { image in
+                CachedAsyncImage(url: URL.posterURL(from: displayPoster(for: item))) { image in
                     image.resizable().aspectRatio(2/3, contentMode: .fill)
                 } placeholder: {
                     Rectangle().fill(Color.gray.opacity(0.3))
@@ -132,6 +135,19 @@ struct HistoryView: View {
     
     /// 将历史记录转换为详情页的入参模型。
     private func movieVideo(from item: VodRecord) -> Movie.Video {
-        Movie.Video(id: item.vodId, name: item.vodName, pic: item.vodPic, sourceKey: item.sourceKey)
+        Movie.Video(id: item.vodId, name: item.vodName, pic: displayPoster(for: item), sourceKey: item.sourceKey)
+    }
+
+    /// 历史记录可能保存了某个资源站的失效海报；同名搜索结果已有正常海报时优先复用。
+    private func displayPoster(for item: VodRecord) -> String {
+        if !PosterCache.isGuaziSource(item.sourceKey) {
+            if let cached = PosterCache.cachedPoster(for: item.vodName, sourceKey: item.sourceKey) {
+                return cached
+            }
+            if PosterCache.isLikelyBroken(item.vodPic, sourceKey: item.sourceKey) {
+                return ""
+            }
+        }
+        return item.vodPic
     }
 }
