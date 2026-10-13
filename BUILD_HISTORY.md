@@ -4,13 +4,14 @@ Actions 运行本身保存在 GitHub；此文件将重要构建与源码提交�
 
 | 时间（UTC） | 分支 | 源码提交 | 结果 | Actions 运行 |
 | --- | --- | --- | --- | --- |
+| 2026-10-13 08:23 | `codex/danmaku-speed` | `3c56659` | 成功；版本 `1.0.1 (2)`，安卓优先弹幕查询验证、Release 编译及未签名 IPA 打包完成 | [38368414882](https://github.com/JackEric6/cc-tv-ios/actions/runs/38368414882) |
 | 2026-10-12 07:28 | `main` | `6bfbadc` | 成功；验证、Release 编译及未签名 IPA 上传完成 | [38217941276](https://github.com/JackEric6/CongcongTV-iOS-Swift/actions/runs/38217941276) |
 | 2026-10-12 06:37 | `variant-xgzy-20260923` | `44ded26` | 成功；上传未签名 IPA 与 `build.log` | [38213469936](https://github.com/JackEric6/CongcongTV-iOS-Swift/actions/runs/38213469936) |
 
 ## 版本标记
 
-- `MARKETING_VERSION`: `1.0.0`
-- `CURRENT_PROJECT_VERSION`: `1`
+- `MARKETING_VERSION`: `1.0.1`
+- `CURRENT_PROJECT_VERSION`: `2`
 - 版本字段定义在 `project.yml`；日常迭代由 Git commit 和 Actions run 追踪。发布到需要唯一构建号的平台前，应先提升构建号。
 
 ## 构建产物
