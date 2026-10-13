@@ -684,7 +684,9 @@ class ApiConfig: ObservableObject {
                 sources.append(self.makeSourceBean(from: guaziSite))
             }
             if let bundledSites = Self.loadBundledConfig(named: "xgzy_config_all")?.sites {
-                let migratedKeys: Set<String> = ["jianpian", "ffzy", "fhw88", "cz4k", "fan_moli", "ikanbot", "zanpian"]
+                let migratedKeys: Set<String> = [
+                    "jianpian", "ffzy", "fhw88", "cz4k", "fan_moli", "fan_cheese", "fan_nomi", "ikanbot", "zanpian"
+                ]
                 for site in bundledSites {
                     guard let key = site.key?.lowercased(), migratedKeys.contains(key) else { continue }
                     let source = self.makeSourceBean(from: site)

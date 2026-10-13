@@ -61,6 +61,9 @@ enum PlaybackRequestHeaderPolicy {
     static let cz4kBrowserUserAgent =
         "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
     static let cz4kReferer = "https://www.cz4k.com/"
+    static let nomiMobileUserAgent =
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1"
+    static let nomiReferer = "https://vip.wwgz.cn:5200/"
 
     static func appliesToCMSPlayback(sourceType: Int) -> Bool {
         sourceType == 0 || sourceType == 1
@@ -144,6 +147,18 @@ enum PlaybackRequestHeaderPolicy {
         to headers: [String: String],
         sourceKey: String
     ) -> [String: String] {
+        if ["fan_nomi", "nuomi", "糯米"].contains(where: {
+            sourceKey.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare($0) == .orderedSame
+        }) {
+            var result = headers
+            result.keys.filter { $0.caseInsensitiveCompare("User-Agent") == .orderedSame }
+                .forEach { result.removeValue(forKey: $0) }
+            result.keys.filter { $0.caseInsensitiveCompare("Referer") == .orderedSame }
+                .forEach { result.removeValue(forKey: $0) }
+            result["User-Agent"] = nomiMobileUserAgent
+            result["Referer"] = nomiReferer
+            return result
+        }
         guard sourceKey.trimmingCharacters(in: .whitespacesAndNewlines)
             .caseInsensitiveCompare("cz4k") == .orderedSame else {
             return headers

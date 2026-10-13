@@ -26,6 +26,10 @@ class SourceService {
             // 荐片不是 CMS JSON 接口；和安卓版一样使用本地分类 JSON，不请求 ?ac=class。
             return (sorts: JianpianHomeCatalog.sorts, homeVideos: [])
         }
+        if SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name) == .nuomi {
+            let sorts = NomiSourceService.categories.map { MovieSort.SortData(id: $0.id, name: $0.name) }
+            return (sorts: sorts, homeVideos: [])
+        }
         let api = sourceBean.api
         guard !api.isEmpty else {
             throw SourceError.emptyApi
@@ -232,6 +236,9 @@ class SourceService {
                 preferredOrigin: sourceBean.api
             )
         }
+        if SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name) == .nuomi {
+            return try await NomiSourceService.category(source: sourceBean, id: sortData.id, page: page)
+        }
         let api = sourceBean.api
         guard !api.isEmpty else { throw SourceError.emptyApi }
         guard sourceBean.isSupportedInSwift else { throw SourceError.unsupportedType(sourceBean.typeDescription) }
@@ -370,6 +377,9 @@ class SourceService {
         if SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name) == .jianpian {
             return try await JianpianSourceService.detail(vodID: vodId, preferredOrigin: sourceBean.api)
         }
+        if SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name) == .nuomi {
+            return try await NomiSourceService.detail(source: sourceBean, vodID: vodId)
+        }
         if SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name) == .changzhang {
             return try await Cz4kSourceService.detail(vodID: vodId)
         }
@@ -483,6 +493,12 @@ class SourceService {
             return try await GuaziService.shared.search(keyword: keyword)
         }
         let searchGroup = SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name)
+        if searchGroup == .nuomi {
+            return filterSearchResults(
+                try await NomiSourceService.search(source: sourceBean, keyword: keyword),
+                keyword: keyword
+            )
+        }
         if searchGroup == .jianpian {
             return filterSearchResults(
                 try await JianpianSourceService.search(keyword: keyword, preferredOrigin: sourceBean.api),
@@ -577,6 +593,17 @@ class SourceService {
                 throw SourceError.invalidPlayableURL(mediaURL)
             }
             return ResolvedPlaybackMedia(url: playableURL, headers: GuaziPlaybackRequest.playbackHeaders)
+        }
+
+        if SearchSourceGroup.classify(sourceKey: sourceBean.key, sourceName: sourceBean.name) == .nuomi {
+            let mediaURL = try await NomiSourceService.resolvePlayableURL(source: sourceBean, episodeURL: url)
+            guard let playableURL = Self.validPlayableURL(KktvsResponseNormalizer.normalizeMediaURL(mediaURL)) else {
+                throw SourceError.invalidPlayableURL(mediaURL)
+            }
+            return ResolvedPlaybackMedia(
+                url: playableURL,
+                headers: playbackHeaders(for: sourceBean, mediaURL: playableURL, refererOverride: url)
+            )
         }
 
         if PlaybackLineSelectionPolicy.preservesPlayerPageReferer(

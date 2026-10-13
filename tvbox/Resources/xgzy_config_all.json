@@ -593,6 +593,32 @@
       "timeout": 25
     },
     {
+      "key": "fan_cheese",
+      "name": "🧀奶酪┃秒播",
+      "type": 1,
+      "api": "http://caiji.dyttzyapi.com/api.php/provide/vod/from/dyttm3u8/at/m3u8/",
+      "searchable": 1,
+      "quickSearch": 1,
+      "changeable": 0,
+      "filterable": 1,
+      "timeout": 20
+    },
+    {
+      "key": "fan_nomi",
+      "name": "🍓糯米┃秒播",
+      "type": 1,
+      "api": "https://vip.wwgz.cn:5200",
+      "searchable": 1,
+      "quickSearch": 1,
+      "changeable": 1,
+      "filterable": 1,
+      "timeout": 15,
+      "headers": {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1",
+        "Referer": "https://vip.wwgz.cn:5200/"
+      }
+    },
+    {
       "key": "ikanbot",
       "name": "爱看",
       "type": 1,
