@@ -41,6 +41,7 @@ public final class DanmuService {
     private var searchInFlight: [String: Task<[DanmuSearchResult], Error>] = [:]
     private var builtinSearchInFlight: [String: Task<[DanmuSearchResult], Error>] = [:]
     private var cueInFlight: [String: Task<[DanmuCue], Error>] = [:]
+    private var loadInFlight: [String: Task<[DanmuCue], Never>] = [:]
 
     private init() {
         customSession = Self.makeSession()
@@ -80,8 +81,27 @@ public final class DanmuService {
         if let cacheKey, let cached = await crossSourceCache.cues(for: cacheKey) {
             return cached
         }
-        let apiURLs = resolveAPIURLs(configuration)
-        let cues: [DanmuCue] = await firstNonEmpty(from: apiURLs) { [weak self] apiURL in
+        let apiURLs = resolveAutomaticAPIURLs(configuration)
+        let contentKey = cacheKey ?? "\(title.lowercased())\u{1F}\(episode.lowercased())"
+        let requestKey = "\(contentKey)\u{1E}\(apiURLs.map { $0.lowercased() }.joined(separator: "|"))"
+        if let task = loadInFlight[requestKey] {
+            return await task.value
+        }
+        let task = Task<[DanmuCue], Never> { @MainActor [weak self] in
+            guard let self else { return [] }
+            return await self.performLoad(title: title, episode: episode, apiURLs: apiURLs)
+        }
+        loadInFlight[requestKey] = task
+        defer { loadInFlight[requestKey] = nil }
+        let cues = await task.value
+        if let cacheKey, !cues.isEmpty {
+            await crossSourceCache.store(cues, for: cacheKey)
+        }
+        return cues
+    }
+
+    private func performLoad(title: String, episode: String, apiURLs: [String]) async -> [DanmuCue] {
+        await firstNonEmpty(from: apiURLs) { [weak self] apiURL in
             guard let self else { return [] }
             do {
                 if Self.isBuiltinAPI(apiURL) {
@@ -100,21 +120,11 @@ public final class DanmuService {
                 let directCues = try await Self.parseOffMain(body)
                 if !directCues.isEmpty { return directCues }
                 let results = Self.parseSearchResults(body)
-                return await self.loadFirstAvailable(
-                    results,
-                    title: title,
-                    episode: episode
-                )
-            } catch is CancellationError {
-                return []
+                return await self.loadFirstAvailable(results, title: title, episode: episode)
             } catch {
                 return []
             }
         }
-        if let cacheKey, !cues.isEmpty {
-            await crossSourceCache.store(cues, for: cacheKey)
-        }
-        return cues
     }
 
     /// Alias kept short for callers that prefer a fetch-style API.
@@ -699,6 +709,15 @@ public final class DanmuService {
             useDefault: useDefault,
             saved: Self.firstDefaultValue(keys: [Self.customAPIKey, "danmaku_api", "danmaku"]),
             configured: ApiConfig.shared.danmaku,
+            builtin: Self.builtinAPI,
+            fallbacks: Self.builtinFallbackAPIs
+        )
+    }
+
+    private func resolveAutomaticAPIURLs(_ configuration: Configuration) -> [String] {
+        DanmuAPISelectionPolicy.automaticCandidates(
+            explicit: configuration.apiURL,
+            selected: resolveAPIURLs(configuration),
             builtin: Self.builtinAPI,
             fallbacks: Self.builtinFallbackAPIs
         )
