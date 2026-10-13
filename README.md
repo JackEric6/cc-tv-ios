@@ -1,4 +1,5 @@
-# 丛丛影视 iOS
+# cc-tv-ios
+
 
 基于 SwiftUI 的 iOS 点播应用，最低支持 iOS 17。工程配置的版本号为 `1.0.0`（build `1`），Bundle ID 为 `com.congcong.tv.xgzy`。中文系统下应用显示为“丛丛影视”。
 
