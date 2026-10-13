@@ -158,7 +158,7 @@ jobs:
             -o /tmp/verify-danmaku-local-cache
           /tmp/verify-danmaku-local-cache
 
-      - name: Verify danmaku API fallback selection
+      - name: Verify automatic danmaku fast-path and API fallback
         run: |
           swiftc -parse-as-library \
             tvbox/Models/DanmuAPISelectionPolicy.swift \

@@ -21,43 +21,67 @@ struct SearchView: View {
         GridItem(.adaptive(minimum: 140, maximum: 180), spacing: 16)
     ]
     #endif
+
+    private let searchBarTopInset: CGFloat = 20
+    private let searchBarBottomInset: CGFloat = 10
+    private let searchBarRowHeight: CGFloat = 44
+
+    private var searchHeaderHeight: CGFloat {
+        searchBarTopInset + searchBarRowHeight + searchBarBottomInset
+    }
+
+    private var shouldShowSearchSuggestions: Bool {
+        !viewModel.keyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !viewModel.isSearching
+            && viewModel.results.isEmpty
+            && !viewModel.searchSuggestions.isEmpty
+    }
     
     var body: some View {
-        VStack(spacing: 0) {
-            // 搜索栏
-            searchBar
+        ZStack(alignment: .top) {
+            VStack(spacing: 0) {
+                searchBar
 
-            // 内容
-            if viewModel.isSearching {
-                if viewModel.results.isEmpty {
-                    Spacer()
-                    ProgressView("搜索中...")
-                        .tint(.orange)
-                    Spacer()
-                } else {
+                if viewModel.isSearching {
+                    if viewModel.results.isEmpty {
+                        Spacer()
+                        ProgressView("搜索中...")
+                            .tint(.orange)
+                        Spacer()
+                    } else {
+                        searchResults
+                            .overlay(alignment: .top) {
+                                ProgressView()
+                                    .tint(.orange)
+                                    .padding(.top, 6)
+                            }
+                    }
+                } else if !viewModel.results.isEmpty {
                     searchResults
-                        .overlay(alignment: .top) {
-                            ProgressView()
-                                .tint(.orange)
-                                .padding(.top, 6)
-                        }
+                } else if viewModel.keyword.isEmpty {
+                    searchHistorySection
+                } else if let error = viewModel.errorMessage {
+                    Spacer()
+                    VStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.largeTitle)
+                            .foregroundColor(.gray)
+                        Text(error)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
                 }
-            } else if !viewModel.results.isEmpty {
-                searchResults
-            } else if viewModel.keyword.isEmpty {
-                // 输入为空时显示历史；输入非空但无结果时显示提示文案。
-                searchHistorySection
-            } else if let error = viewModel.errorMessage {
-                Spacer()
-                VStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.largeTitle)
-                        .foregroundColor(.gray)
-                    Text(error)
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
+            }
+
+            if shouldShowSearchSuggestions {
+                VStack(spacing: 0) {
+                    Color.clear.frame(height: searchHeaderHeight)
+                    suggestionSection
                 }
-                Spacer()
+                .padding(.horizontal, 20)
+                .frame(maxWidth: .infinity, alignment: .top)
+                .zIndex(1)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -92,13 +116,12 @@ struct SearchView: View {
     
     /// 顶部搜索输入区。
     private var searchBar: some View {
-        VStack(alignment: .leading, spacing: 8) {
         HStack(spacing: 12) {
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(.white.opacity(0.8))
-                
+
                 TextField("搜索影片...", text: $viewModel.keyword)
                     .textFieldStyle(.plain)
                     .font(.system(size: 16))
@@ -113,14 +136,14 @@ struct SearchView: View {
                     #if os(iOS)
                     .autocapitalization(.none)
                     #endif
-                
+
                 if !viewModel.keyword.isEmpty {
-                        Button {
-                            withAnimation {
-                                viewModel.cancelSearch()
-                                viewModel.keyword = ""
-                                viewModel.results = []
-                            }
+                    Button {
+                        withAnimation {
+                            viewModel.cancelSearch()
+                            viewModel.keyword = ""
+                            viewModel.results = []
+                        }
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundColor(.white.opacity(0.4))
@@ -136,7 +159,7 @@ struct SearchView: View {
                 RoundedRectangle(cornerRadius: 16)
                     .stroke(LinearGradient(colors: [.orange.opacity(0.5), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
             )
-            
+
             Button {
                 Task { await viewModel.search() }
             } label: {
@@ -152,16 +175,10 @@ struct SearchView: View {
             .disabled(!apiConfig.isLoaded || viewModel.isSearching)
             .opacity(apiConfig.isLoaded ? 1 : 0.65)
         }
-            if !viewModel.keyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-               !viewModel.isSearching,
-               viewModel.results.isEmpty,
-               !viewModel.searchSuggestions.isEmpty {
-                suggestionSection
-            }
-        }
+        .frame(height: searchBarRowHeight)
         .padding(.horizontal, 20)
-        .padding(.top, 20)
-        .padding(.bottom, 10)
+        .padding(.top, searchBarTopInset)
+        .padding(.bottom, searchBarBottomInset)
     }
 
     private var suggestionSection: some View {
@@ -188,8 +205,9 @@ struct SearchView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(Color.white.opacity(0.06))
+        .background(Color(red: 0.12, green: 0.12, blue: 0.15).opacity(0.98))
         .cornerRadius(8)
+        .shadow(color: .black.opacity(0.35), radius: 10, y: 5)
     }
     
     // MARK: - 搜索结果

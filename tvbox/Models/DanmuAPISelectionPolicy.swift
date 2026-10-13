@@ -1,6 +1,16 @@
 import Foundation
 
 enum DanmuAPISelectionPolicy {
+    static func automaticCandidates(
+        explicit: String?,
+        selected: [String],
+        builtin: String,
+        fallbacks: [String]
+    ) -> [String] {
+        guard normalized(explicit) == nil else { return selected }
+        return unique(([builtin] + fallbacks + selected).compactMap(normalized))
+    }
+
     static func candidates(
         explicit: String?,
         useDefault: Bool,
