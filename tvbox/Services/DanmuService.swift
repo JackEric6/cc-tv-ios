@@ -414,7 +414,7 @@ public final class DanmuService {
         query: String,
         episode: String
     ) async throws -> [DanmuSearchResult] {
-        let cacheKey = "\(baseURL.lowercased())\u{1E}\(query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())\u{1F}\(episode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())"
+        let cacheKey = builtinSearchCacheKey(baseURL: baseURL, query: query, episode: episode)
         if let cached = builtinSearchCache[cacheKey], Date().timeIntervalSince(cached.date) < Self.cacheLifetime {
             return cached.results
         }
@@ -441,21 +441,22 @@ public final class DanmuService {
         episode: String
     ) async throws -> [DanmuSearchResult] {
         let episodeNumber = Self.extractEpisodeNumber(episode)
-        async let matchedTask = searchBuiltinMatches(
-            baseURL: baseURL,
-            title: query,
-            episode: episode
-        )
-        async let focusedTask = episodeNumber > 0
-            ? searchBuiltinEpisodes(baseURL: baseURL, query: query, episode: String(episodeNumber))
-            : []
-        async let broadTask = searchBuiltinEpisodes(baseURL: baseURL, query: query, episode: nil)
-        let (matchedResults, focusedResults, broadResults) = await (
-            matchedTask,
-            focusedTask,
-            broadTask
-        )
-        var allResults = matchedResults + focusedResults + broadResults
+        var focusedResults: [DanmuSearchResult] = []
+        if DanmuBuiltinSearchPolicy.shouldSearchFocusedEpisode(episodeNumber: episodeNumber) {
+            focusedResults = await searchBuiltinEpisodes(
+                baseURL: baseURL,
+                query: query,
+                episode: String(episodeNumber)
+            )
+        }
+        if !DanmuBuiltinSearchPolicy.shouldRunFallbackSearch(
+            episodeNumber: episodeNumber,
+            focusedCandidateCount: focusedResults.count
+        ) {
+            return Self.prioritizeBuiltinResults(focusedResults, query: query, episode: episode)
+        }
+
+        var allResults = await searchBuiltinFallbackResults(baseURL: baseURL, query: query, episode: episode)
 
         if Self.automaticLoadCandidates(allResults, title: query, episode: episode).isEmpty,
            let variant = Self.searchTitleVariants(query).first {
@@ -490,6 +491,26 @@ public final class DanmuService {
         let uniqueResults = Self.automaticLoadCandidates(allResults, title: query, episode: episode)
             .filter { seen.insert($0.url).inserted }
         return Self.prioritizeBuiltinResults(uniqueResults, query: query, episode: episode)
+    }
+
+    private func searchBuiltinFallbackResults(
+        baseURL: String,
+        query: String,
+        episode: String
+    ) async -> [DanmuSearchResult] {
+        // The focused episode query has already missed; try broader matches now.
+        async let matchedTask = searchBuiltinMatches(baseURL: baseURL, title: query, episode: episode)
+        async let broadTask = searchBuiltinEpisodes(baseURL: baseURL, query: query, episode: nil)
+        let (matchedResults, broadResults) = await (matchedTask, broadTask)
+        let allResults = matchedResults + broadResults
+        var seen = Set<String>()
+        let uniqueResults = Self.automaticLoadCandidates(allResults, title: query, episode: episode)
+            .filter { seen.insert($0.url).inserted }
+        return Self.prioritizeBuiltinResults(uniqueResults, query: query, episode: episode)
+    }
+
+    private func builtinSearchCacheKey(baseURL: String, query: String, episode: String) -> String {
+        "\(baseURL.lowercased())\u{1E}\(query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())\u{1F}\(episode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())"
     }
 
     private func searchBuiltinEpisodes(
@@ -699,6 +720,25 @@ public final class DanmuService {
             episode: episode
         )
         if !directCues.isEmpty { return directCues }
+        let episodeNumber = Self.extractEpisodeNumber(episode)
+        if episodeNumber > 0, !candidates.isEmpty {
+            let fallbackCandidates = await searchBuiltinFallbackResults(
+                baseURL: baseURL,
+                query: title,
+                episode: episode
+            )
+            let seenURLs = Set(candidates.map(\.url))
+            let uniqueFallbacks = fallbackCandidates.filter { !seenURLs.contains($0.url) }
+            if !uniqueFallbacks.isEmpty {
+                pruneCachesIfNeeded()
+                builtinSearchCache[builtinSearchCacheKey(baseURL: baseURL, query: title, episode: episode)] = (
+                    Date(),
+                    candidates + uniqueFallbacks
+                )
+                let fallbackCues = await loadFirstAvailable(uniqueFallbacks, title: title, episode: episode)
+                if !fallbackCues.isEmpty { return fallbackCues }
+            }
+        }
         guard !candidates.isEmpty else { return [] }
 
         // Some servers return only anime search results from the episodes route.

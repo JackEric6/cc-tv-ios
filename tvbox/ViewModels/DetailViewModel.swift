@@ -71,6 +71,7 @@ class DetailViewModel: ObservableObject {
     private var qualityResolveToken = UUID()
     /// KKT影视播放器页解析任务，避免切换剧集后旧地址回写。
     private var playableResolveTask: Task<Void, Never>?
+    private var danmakuPreloadTask: Task<Void, Never>?
     private var playableResolveToken = UUID()
     private var purifierFallbackURL: String?
     private var activePlaybackHeaders: [String: String]?
@@ -863,6 +864,8 @@ class DetailViewModel: ObservableObject {
             return
         }
 
+        preloadDanmakuForCurrentEpisode()
+
         errorMessage = nil
         shouldRetryAfterNetworkRecovery = false
         shouldAutoplayAfterNetworkRecovery = true
@@ -978,6 +981,21 @@ class DetailViewModel: ObservableObject {
                 token: token
             )
         }
+    }
+
+    private func preloadDanmakuForCurrentEpisode() {
+        #if os(iOS)
+        danmakuPreloadTask?.cancel()
+        danmakuPreloadTask = nil
+        guard DanmakuDisplaySettings.load().enabled else { return }
+        let title = (vodInfo?.name ?? lastVideo?.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let episode = (vodInfo?.currentEpisode?.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, !episode.isEmpty else { return }
+
+        danmakuPreloadTask = Task { @MainActor in
+            _ = await DanmuService.shared.loadCues(title: title, episode: episode)
+        }
+        #endif
     }
 
     var currentPlaybackHeaders: [String: String] {
