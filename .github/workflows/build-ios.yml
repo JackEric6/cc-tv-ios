@@ -166,6 +166,14 @@ jobs:
             -o /tmp/verify-danmu-api-selection
           /tmp/verify-danmu-api-selection
 
+      - name: Verify Android-first danmaku search
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/DanmuBuiltinSearchPolicy.swift \
+            scripts/verify-danmu-builtin-search.swift \
+            -o /tmp/verify-danmu-builtin-search
+          /tmp/verify-danmu-builtin-search
+
       - name: Verify built-in danmaku match API
         run: |
           swiftc -parse-as-library \
