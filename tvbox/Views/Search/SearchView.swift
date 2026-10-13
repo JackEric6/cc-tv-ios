@@ -38,56 +38,30 @@ struct SearchView: View {
     }
     
     var body: some View {
-        ZStack(alignment: .top) {
-            VStack(spacing: 0) {
+        GeometryReader { geometry in
+            ZStack(alignment: .top) {
+                searchContent
+                    .padding(.top, searchHeaderHeight)
+
                 searchBar
+                    .frame(maxWidth: .infinity, alignment: .top)
+                    .transaction { $0.animation = nil }
+                    .zIndex(1)
 
-                if viewModel.isSearching {
-                    if viewModel.results.isEmpty {
-                        Spacer()
-                        ProgressView("搜索中...")
-                            .tint(.orange)
-                        Spacer()
-                    } else {
-                        searchResults
-                            .overlay(alignment: .top) {
-                                ProgressView()
-                                    .tint(.orange)
-                                    .padding(.top, 6)
-                            }
-                    }
-                } else if !viewModel.results.isEmpty {
-                    searchResults
-                } else if viewModel.keyword.isEmpty {
-                    searchHistorySection
-                } else if let error = viewModel.errorMessage {
-                    Spacer()
-                    VStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass")
-                            .font(.largeTitle)
-                            .foregroundColor(.gray)
-                        Text(error)
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                }
-            }
-
-            if shouldShowSearchSuggestions {
-                VStack(spacing: 0) {
-                    Color.clear.frame(height: searchHeaderHeight)
+                if shouldShowSearchSuggestions {
                     suggestionSection
+                        .padding(.horizontal, 20)
+                        .padding(.top, searchHeaderHeight)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .zIndex(2)
                 }
-                .padding(.horizontal, 20)
-                .frame(maxWidth: .infinity, alignment: .top)
-                .zIndex(1)
             }
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
+            .background(Color(red: 0.08, green: 0.08, blue: 0.1))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(Color(red: 0.08, green: 0.08, blue: 0.1))
         #if os(iOS)
-        .ignoresSafeArea(.keyboard, edges: .bottom)
+        .ignoresSafeArea(.keyboard)
         #endif
         .navigationTitle("搜索")
         #if os(iOS)
@@ -95,6 +69,42 @@ struct SearchView: View {
         #endif
         .task {
             await loadTrending()
+        }
+    }
+
+    @ViewBuilder
+    private var searchContent: some View {
+        VStack(spacing: 0) {
+            if viewModel.isSearching {
+                if viewModel.results.isEmpty {
+                    Spacer()
+                    ProgressView("搜索中...")
+                        .tint(.orange)
+                    Spacer()
+                } else {
+                    searchResults
+                        .overlay(alignment: .top) {
+                            ProgressView()
+                                .tint(.orange)
+                                .padding(.top, 6)
+                        }
+                }
+            } else if !viewModel.results.isEmpty {
+                searchResults
+            } else if viewModel.keyword.isEmpty {
+                searchHistorySection
+            } else if let error = viewModel.errorMessage {
+                Spacer()
+                VStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.largeTitle)
+                        .foregroundColor(.gray)
+                    Text(error)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            }
         }
     }
 

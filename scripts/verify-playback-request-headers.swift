@@ -104,6 +104,14 @@ struct VerifyPlaybackRequestHeaders {
         )
         precondition(cz4kHeaders["User-Agent"] == PlaybackRequestHeaderPolicy.cz4kBrowserUserAgent)
         precondition(cz4kHeaders["Referer"] == PlaybackRequestHeaderPolicy.cz4kReferer)
+        let nomiHeaders = PlaybackRequestHeaderPolicy.applyingSourceSpecificPlaybackHeaders(
+            to: ["User-Agent": PlaybackRequestHeaderPolicy.androidDefaultUserAgent, "Referer": "https://stale.example/"],
+            sourceKey: "fan_nomi"
+        )
+        precondition(nomiHeaders["User-Agent"] == PlaybackRequestHeaderPolicy.nomiMobileUserAgent)
+        precondition(nomiHeaders["Referer"] == PlaybackRequestHeaderPolicy.nomiReferer)
+        precondition(nomiHeaders.keys.filter { $0.caseInsensitiveCompare("User-Agent") == .orderedSame }.count == 1)
+        precondition(nomiHeaders.keys.filter { $0.caseInsensitiveCompare("Referer") == .orderedSame }.count == 1)
         precondition(PlaybackRequestHeaderPolicy.appliesToCMSPlayback(sourceType: 0))
         precondition(PlaybackRequestHeaderPolicy.appliesToCMSPlayback(sourceType: 1))
         precondition(!PlaybackRequestHeaderPolicy.appliesToCMSPlayback(sourceType: 4))
