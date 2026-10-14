@@ -405,3 +405,4 @@ jobs:
             CongcongTV-unsigned.ipa
             build.log
           if-no-files-found: error
+          retention-days: 1
