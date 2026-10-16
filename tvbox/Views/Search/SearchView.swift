@@ -5,6 +5,7 @@ struct SearchView: View {
     /// 搜索状态与结果管理。
     @StateObject private var viewModel = SearchViewModel()
     @ObservedObject private var apiConfig = ApiConfig.shared
+    @ObservedObject private var adultFilter = AdultContentFilterSession.shared
     /// 豆瓣当前热门条目，作为搜索页空态热搜榜。
     @State private var trendingItems: [DoubanTrendingItem] = []
     @State private var isLoadingTrending = false
@@ -69,6 +70,9 @@ struct SearchView: View {
         #endif
         .task {
             await loadTrending()
+        }
+        .onChange(of: adultFilter.sessionFilterAdult) { _, _ in
+            viewModel.reapplyAdultFilter()
         }
     }
 

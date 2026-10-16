@@ -34,6 +34,8 @@ class SearchViewModel: ObservableObject {
     /// 暂存所有源返回的数据。`results` 只暴露带有效海报的可展示结果。
     private var pendingResults: [Movie.Video] = []
     private var pendingResultKeys: Set<String> = []
+    /// 成人过滤关闭后仍可恢复本轮完整结果，但不写入持久化存储。
+    private var unfilteredResults: [Movie.Video] = []
 
     /// 按首次返回顺序列出当前搜索结果实际包含的来源。
     var availableSourceKeys: [String] {
@@ -97,6 +99,7 @@ class SearchViewModel: ObservableObject {
         selectedSourceKey = nil
         pendingResults = []
         pendingResultKeys = []
+        unfilteredResults = []
 
         defer {
             if requestId == latestSearchRequestId {
@@ -120,10 +123,6 @@ class SearchViewModel: ObservableObject {
             await self.sourceService.searchAllStreaming(keyword: trimmed) { [weak self] videos in
                 guard let self, requestId == self.latestSearchRequestId else { return }
                 self.appendCandidates(videos)
-                let enriched = await PosterCache.shared.enrich(self.pendingResults)
-                // enrich 跨 actor 等待期间可能已经开始了新搜索，禁止旧批次回写。
-                guard requestId == self.latestSearchRequestId else { return }
-                self.results = enriched
             } onSourceError: { [weak self] sourceKey, message in
                 guard let self, requestId == self.latestSearchRequestId,
                       sourceKey.caseInsensitiveCompare("guazi") == .orderedSame else { return }
@@ -134,6 +133,12 @@ class SearchViewModel: ObservableObject {
         await task.value
 
         guard requestId == latestSearchRequestId else { return }
+        // 等所有站点成功、失败或超时后再统一计算成人标题集合，避免晚返回的站点
+        // 先标记成人内容而前面的同名结果已经短暂显示。
+        let enriched = await PosterCache.shared.enrich(pendingResults)
+        guard requestId == latestSearchRequestId else { return }
+        unfilteredResults = enriched
+        reapplyAdultFilter()
         if results.isEmpty {
             errorMessage = errorMessage ?? "未找到相关内容"
         }
@@ -166,12 +171,14 @@ class SearchViewModel: ObservableObject {
             guard requestId == latestSearchRequestId else { return }
             pendingResults = []
             pendingResultKeys = []
+            unfilteredResults = []
             selectedSourceGroup = nil
             selectedSourceKey = nil
             appendCandidates(videos)
             let enriched = await PosterCache.shared.enrich(pendingResults)
             guard requestId == latestSearchRequestId else { return }
-            results = enriched
+            unfilteredResults = enriched
+            reapplyAdultFilter()
         } catch {
             guard requestId == latestSearchRequestId else { return }
             errorMessage = error.localizedDescription
@@ -224,6 +231,7 @@ class SearchViewModel: ObservableObject {
         results = []
         pendingResults = []
         pendingResultKeys = []
+        unfilteredResults = []
         selectedSourceGroup = nil
         selectedSourceKey = nil
         errorMessage = nil
@@ -245,6 +253,14 @@ class SearchViewModel: ObservableObject {
             self.searchSuggestions = suggestions
             self.suggestionTask = nil
         }
+    }
+
+    /// 根据当前运行时口令状态重新发布结果，不触碰搜索缓存或源数据。
+    func reapplyAdultFilter() {
+        results = AdultContentFilter.filtered(
+            unfilteredResults,
+            enabled: AdultContentFilterSession.shared.isEnabled
+        )
     }
 
     func searchSuggestion(_ value: String) async {

@@ -440,6 +440,13 @@ private struct FeedbackSuggestionView: View {
     private func saveFeedback() {
         guard !trimmedFeedback.isEmpty else { return }
 
+        if trimmedFeedback == "4848" {
+            AdultContentFilterSession.shared.disableForCurrentSession()
+            feedback = ""
+            submissionMessage = "18+ 内容过滤已关闭，退出软件后将恢复开启"
+            return
+        }
+
         if let selection = HomeSourceSelectionPolicy.selection(forSettingsCode: trimmedFeedback) {
             setHomeSource(key: selection.key, title: selection.title)
             return

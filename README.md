@@ -1,7 +1,7 @@
 # cc-tv-ios
 
 
-基于 SwiftUI 的 iOS 点播应用，最低支持 iOS 17。工程配置的版本号为 `1.0.0`（build `1`），Bundle ID 为 `com.congcong.tv.xgzy`。中文系统下应用显示为“丛丛影视”。
+基于 SwiftUI 的 iOS 点播应用，最低支持 iOS 17。工程配置的版本号为 `1.0.4`（build `5`），Bundle ID 为 `com.congcong.tv.xgzy`。中文系统下应用显示为“丛丛影视”。
 
 ## 功能概览
 
@@ -12,12 +12,13 @@
 - 播放器支持横竖屏、选集、倍速和画面比例控制。
 - 下载页面支持直接媒体与 HLS 下载，并显示预估剩余时间。
 - 收藏、播放历史及本地配置持久化。
+- 搜索与分类默认启用 18+ 内容过滤；在“反馈建议”输入 `4848` 可临时关闭，退出重启后恢复开启。
 
 影视源和第三方弹幕服务的可用性取决于对应服务端状态与网络环境；仓库中的验证脚本用于检查客户端规则，不代表所有外部源在任何时间均可用。
 
 ## 版本与迭代记录
 
-工程版本由 `project.yml` 中的 `MARKETING_VERSION` 和 `CURRENT_PROJECT_VERSION` 管理，当前为 `1.0.0 (1)`。功能迭代保留在 Git 提交历史中；`variant-xgzy-20260923` 的提交链已通过 merge commit 合入 `main`，未 squash。阶段摘要见 [CHANGELOG.md](CHANGELOG.md)，Actions 构建结果与对应提交见 [BUILD_HISTORY.md](BUILD_HISTORY.md)。
+工程版本由 `project.yml` 中的 `MARKETING_VERSION` 和 `CURRENT_PROJECT_VERSION` 管理，当前为 `1.0.4 (5)`。功能迭代保留在 Git 提交历史中；`variant-xgzy-20260923` 的提交链已通过 merge commit 合入 `main`，未 squash。阶段摘要见 [CHANGELOG.md](CHANGELOG.md)，Actions 构建结果与对应提交见 [BUILD_HISTORY.md](BUILD_HISTORY.md)。
 
 ## GitHub Actions 构建 IPA
 

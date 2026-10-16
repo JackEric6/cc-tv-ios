@@ -13,6 +13,8 @@ class HomeViewModel: ObservableObject {
     @Published var homeVideos: [Movie.Video] = []
     /// 普通分类的视频列表（分页加载）。
     @Published var categoryVideos: [Movie.Video] = []
+    /// 分类列表的未过滤快照，用于 4848 会话口令生效后立即刷新页面。
+    private var unfilteredCategoryVideos: [Movie.Video] = []
     /// 页面加载状态（分类加载与分页共用）。
     @Published var isLoading = false
     /// 当前分类的分页页码。
@@ -125,6 +127,7 @@ class HomeViewModel: ObservableObject {
                 if let firstSort = effectiveSorts.first, selectedSort?.id != firstSort.id {
                     selectedSort = firstSort
                     categoryVideos = []
+                    unfilteredCategoryVideos = []
                     currentPage = 1
                     hasMore = true
                     Task { @MainActor [weak self] in
@@ -138,6 +141,7 @@ class HomeViewModel: ObservableObject {
                 // 用户选择的标签在新源中不存在时，才回退到新源最终首项。
                 selectedSort = effectiveSorts.first
                 categoryVideos = []
+                unfilteredCategoryVideos = []
                 currentPage = 1
                 hasMore = true
                 if let firstSort = selectedSort {
@@ -390,6 +394,7 @@ class HomeViewModel: ObservableObject {
         selectedSort = sort
         errorMessage = nil
         categoryVideos = []
+        unfilteredCategoryVideos = []
         currentPage = 1
         hasMore = true
         
@@ -421,8 +426,8 @@ class HomeViewModel: ObservableObject {
                 try await sourceService.getList(sourceBean: source, sortData: sort, page: page),
                 source: source
             )
-            let filteredVideos = strictCategoryVideos(videos, for: sort, source: source)
-            let enrichedVideos = await PosterCache.shared.fill(filteredVideos)
+            let categoryCandidates = strictCategoryVideos(videos, for: sort, source: source)
+            let enrichedVideos = await PosterCache.shared.fill(categoryCandidates)
             
             // 分类切换过程中，丢弃旧请求结果
             guard requestGeneration == loadGeneration,
@@ -450,14 +455,16 @@ class HomeViewModel: ObservableObject {
                     errorMessage = "资源站暂时没有返回分类内容，请稍后重试"
                     return
                 }
-                categoryVideos = enrichedVideos
+                unfilteredCategoryVideos = enrichedVideos
+                categoryVideos = filteredAdultVideos(enrichedVideos)
                 if !enrichedVideos.isEmpty {
                     didLoadInitialContent = true
                     initialLoadRetryAttempt = 0
                     cancelInitialLoadRetry()
                 }
             } else {
-                categoryVideos.append(contentsOf: enrichedVideos)
+                unfilteredCategoryVideos.append(contentsOf: enrichedVideos)
+                categoryVideos = filteredAdultVideos(unfilteredCategoryVideos)
             }
             // 以"返回非空"作为是否继续分页的轻量判断。
             currentPage = page
@@ -540,8 +547,8 @@ class HomeViewModel: ObservableObject {
                 try await sourceService.getList(sourceBean: source, sortData: firstCategory, page: 1),
                 source: source
             )
-            let filteredVideos = strictCategoryVideos(videos, for: firstCategory, source: source)
-            let enrichedVideos = await PosterCache.shared.fill(filteredVideos)
+            let categoryCandidates = strictCategoryVideos(videos, for: firstCategory, source: source)
+            let enrichedVideos = await PosterCache.shared.fill(categoryCandidates)
             guard requestGeneration == refreshGeneration else { return }
 
             if enrichedVideos.isEmpty, isGuaziSource(source),
@@ -560,7 +567,8 @@ class HomeViewModel: ObservableObject {
             }
 
             selectedSort = firstCategory
-            categoryVideos = enrichedVideos
+            unfilteredCategoryVideos = enrichedVideos
+            categoryVideos = filteredAdultVideos(enrichedVideos)
             currentPage = 1
             hasMore = !enrichedVideos.isEmpty
         } catch {
@@ -662,9 +670,9 @@ class HomeViewModel: ObservableObject {
                         }
                         continue
                     }
-                    let filteredVideos = strictCategoryVideos(rawVideos, for: sort, source: fallbackSource)
-                    guard !filteredVideos.isEmpty else { continue }
-                    let cachedVideos = await PosterCache.shared.fill(filteredVideos)
+                    let categoryCandidates = strictCategoryVideos(rawVideos, for: sort, source: fallbackSource)
+                    guard !categoryCandidates.isEmpty else { continue }
+                    let cachedVideos = await PosterCache.shared.fill(categoryCandidates)
                     videos = cachedVideos.map { video in
                         var boundVideo = video
                         boundVideo.sourceKey = fallbackSource.key
@@ -687,7 +695,8 @@ class HomeViewModel: ObservableObject {
                     return boundVideo
                 }
                 selectedSort = firstSort
-                categoryVideos = videos
+                unfilteredCategoryVideos = videos
+                categoryVideos = filteredAdultVideos(videos)
                 didCompleteInitialSortLoad = true
                 didLoadInitialContent = true
                 initialLoadRetryAttempt = 0
@@ -858,6 +867,15 @@ class HomeViewModel: ObservableObject {
             let videoTypeID = video.tid.trimmingCharacters(in: .whitespacesAndNewlines)
             return !videoTypeID.isEmpty && videoTypeID == categoryID
         }
+    }
+
+    private func filteredAdultVideos(_ videos: [Movie.Video]) -> [Movie.Video] {
+        AdultContentFilter.filtered(videos, enabled: AdultContentFilterSession.shared.isEnabled)
+    }
+
+    /// 设置页输入 4848 后，已打开的首页分类无需重新请求即可更新。
+    func reapplyAdultFilter() {
+        categoryVideos = filteredAdultVideos(unfilteredCategoryVideos)
     }
 
     private func videosBoundToSource(_ videos: [Movie.Video], source: SourceBean) -> [Movie.Video] {
