@@ -36,6 +36,10 @@ class SearchViewModel: ObservableObject {
     private var pendingResultKeys: Set<String> = []
     /// 成人过滤关闭后仍可恢复本轮完整结果，但不写入持久化存储。
     private var unfilteredResults: [Movie.Video] = []
+    /// 聚合搜索的完成标记。异常资源站不能无限期阻塞本轮结果展示。
+    private var completedSearchRequestId: UUID?
+    private var ignoredSearchRequestId: UUID?
+    private static let searchAggregationTimeoutNanoseconds: UInt64 = 15_000_000_000
 
     /// 按首次返回顺序列出当前搜索结果实际包含的来源。
     var availableSourceKeys: [String] {
@@ -100,6 +104,8 @@ class SearchViewModel: ObservableObject {
         pendingResults = []
         pendingResultKeys = []
         unfilteredResults = []
+        completedSearchRequestId = nil
+        ignoredSearchRequestId = nil
 
         defer {
             if requestId == latestSearchRequestId {
@@ -111,9 +117,12 @@ class SearchViewModel: ObservableObject {
         // 搜索一旦触发就先落历史，保持行为与移动端常见搜索体验一致。
         addToHistory(trimmed)
         
-        // 每个源完成后立即追加一批结果；旧关键词的回调会被请求序号丢弃。
+        // 各源完成后暂存结果；成人过滤需要在聚合完成或超时后统一计算。
         let task = Task { [weak self] in
             guard let self else { return }
+            defer {
+                self.completedSearchRequestId = requestId
+            }
             do {
                 try await Task.sleep(nanoseconds: Self.searchDebounceNanoseconds)
                 try Task.checkCancellation()
@@ -121,16 +130,34 @@ class SearchViewModel: ObservableObject {
                 return
             }
             await self.sourceService.searchAllStreaming(keyword: trimmed) { [weak self] videos in
-                guard let self, requestId == self.latestSearchRequestId else { return }
+                guard let self,
+                      requestId == self.latestSearchRequestId,
+                      requestId != self.ignoredSearchRequestId else { return }
                 self.appendCandidates(videos)
             } onSourceError: { [weak self] sourceKey, message in
-                guard let self, requestId == self.latestSearchRequestId,
+                guard let self,
+                      requestId == self.latestSearchRequestId,
+                      requestId != self.ignoredSearchRequestId,
                       sourceKey.caseInsensitiveCompare("guazi") == .orderedSame else { return }
                 self.errorMessage = "瓜子搜索失败：\(message)"
             }
         }
         activeSearchTask = task
-        await task.value
+
+        // 过滤需要聚合成人标题，但不能让一个失效资源站把搜索页永久卡在“搜索中”。
+        // 到达截止时间后使用已返回的结果继续过滤；迟到的回调会被 request 标记丢弃。
+        let deadline = Date().addingTimeInterval(
+            TimeInterval(Self.searchAggregationTimeoutNanoseconds) / 1_000_000_000
+        )
+        while completedSearchRequestId != requestId,
+              Date() < deadline,
+              !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        if completedSearchRequestId != requestId {
+            ignoredSearchRequestId = requestId
+            task.cancel()
+        }
 
         guard requestId == latestSearchRequestId else { return }
         // 等所有站点成功、失败或超时后再统一计算成人标题集合，避免晚返回的站点
