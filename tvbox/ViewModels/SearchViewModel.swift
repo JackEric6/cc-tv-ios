@@ -39,7 +39,8 @@ class SearchViewModel: ObservableObject {
     /// 聚合搜索的完成标记。异常资源站不能无限期阻塞本轮结果展示。
     private var completedSearchRequestId: UUID?
     private var ignoredSearchRequestId: UUID?
-    private static let searchAggregationTimeoutNanoseconds: UInt64 = 15_000_000_000
+    // 聚合搜索最多等待 3 秒，避免单个失效资源站拖住整页搜索。
+    private static let searchAggregationTimeoutNanoseconds: UInt64 = 3_000_000_000
 
     /// 按首次返回顺序列出当前搜索结果实际包含的来源。
     var availableSourceKeys: [String] {
