@@ -4,6 +4,7 @@ import SwiftUI
 struct HomeView: View {
     @StateObject private var viewModel = HomeViewModel()
     @EnvironmentObject var appState: AppState
+    @ObservedObject private var adultFilter = AdultContentFilterSession.shared
     @State private var categoryScrollAnchorId: String?
     @State private var contentScrollAnchorId: String?
     
@@ -63,6 +64,9 @@ struct HomeView: View {
             Task {
                 await viewModel.refresh()
             }
+        }
+        .onChange(of: adultFilter.sessionFilterAdult) { _, _ in
+            viewModel.reapplyAdultFilter()
         }
     }
     

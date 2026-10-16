@@ -29,6 +29,9 @@ struct Movie: Codable {
         var area: String = ""
         /// 类型/分类名。
         var type: String = ""
+        /// 资源站返回的成人分类字段（vod_class / vod_type_name）。
+        var category: String = ""
+        var vodTypeName: String = ""
         /// 导演。
         var director: String = ""
         /// 演员。
@@ -71,13 +74,15 @@ struct Movie: Codable {
         }
         
         init(id: String = UUID().uuidString, name: String = "", pic: String = "",
-             note: String = "", sourceKey: String = "", doubanRating: String = "") {
+             note: String = "", sourceKey: String = "", doubanRating: String = "", category: String = "") {
             self.id = id
             self.name = name
             self.pic = pic
             self.note = note
             self.sourceKey = sourceKey
             self.doubanRating = doubanRating
+            self.category = category
+            self.vodTypeName = ""
         }
         
         enum CodingKeys: String, CodingKey {
@@ -88,6 +93,8 @@ struct Movie: Codable {
             case year = "vod_year"
             case area = "vod_area"
             case type = "type_name"
+            case category = "vod_class"
+            case vodTypeName = "vod_type_name"
             case director = "vod_director"
             case actor = "vod_actor"
             case des = "vod_content"
@@ -113,6 +120,9 @@ struct Movie: Codable {
             self.year = (try? container.decode(String.self, forKey: .year)) ?? ""
             self.area = (try? container.decode(String.self, forKey: .area)) ?? ""
             self.type = (try? container.decode(String.self, forKey: .type)) ?? ""
+            self.category = (try? container.decode(String.self, forKey: .category))
+                ?? ""
+            self.vodTypeName = (try? container.decode(String.self, forKey: .vodTypeName)) ?? ""
             self.director = (try? container.decode(String.self, forKey: .director)) ?? ""
             self.actor = (try? container.decode(String.self, forKey: .actor)) ?? ""
             self.des = (try? container.decode(String.self, forKey: .des)) ?? ""
