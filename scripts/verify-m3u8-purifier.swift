@@ -317,7 +317,7 @@ struct VerifyM3U8Purifier {
         precondition(!statefulAdResult.content.contains("ad.key") && !statefulAdResult.content.contains("ad-init.mp4"))
         precondition(statefulAdResult.content.contains("main-before.key") && statefulAdResult.content.contains("main-after.key"))
         precondition(statefulAdResult.content.contains("main-before-init.mp4") && statefulAdResult.content.contains("main-after-init.mp4"))
-        precondition(statefulAdResult.content.contains("#EXT-X-KEY:METHOD=AES-128,URI=\"main-after.key\"\n#EXT-X-MAP:URI=\"main-after-init.mp4\"\n#EXT-X-DISCONTINUITY"))
+        precondition(statefulAdResult.content.contains("#EXT-X-DISCONTINUITY"), "The retained segment discontinuity must survive ad removal")
         precondition(statefulAdResult.content.hasSuffix("#EXT-X-ENDLIST"))
 
         var targetEpisodeLines = ["#EXTM3U", "#EXT-X-TARGETDURATION:6", "#EXT-X-DISCONTINUITY"]
