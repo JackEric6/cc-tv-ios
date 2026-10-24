@@ -357,6 +357,23 @@ struct M3U8ManifestPurifier {
         let removedSegmentCount: Int
     }
 
+    private struct AdDateRange {
+        var startOffset: Double
+        var startDate: Date?
+        var endDate: Date?
+        var duration: Double?
+        var isAd: Bool
+    }
+
+    private struct TimedSegment {
+        let lines: [String]
+        let duration: Double
+        let startOffset: Double
+        let programDateTime: Date?
+        let keyState: String
+        let mapState: String
+    }
+
     private static let adURLPattern = try! NSRegularExpression(
         pattern: #"(?i)(^|[/?&=_.-])(ads?|adv|advert(ise(ment)?)?|commercial|preroll|pre-roll|midroll|mid-roll|postroll|post-roll|sponsor|scte|vast|vmap|interstitial|bumper)([/?&=_.-]|$)"#
     )
@@ -387,6 +404,7 @@ struct M3U8ManifestPurifier {
             hostRules: hostRules,
             removed: &removed
         )
+        transformed = removeTimedAdRanges(transformed, removed: &removed)
         transformed = removeCommonAdMarkers(transformed, removed: &removed)
         if hasEndList(transformed) && transformed.contains("#EXT-X-DISCONTINUITY") {
             transformed = removeDecimalPrecisionGroups(transformed, removed: &removed)
@@ -528,41 +546,274 @@ struct M3U8ManifestPurifier {
         var output: [String] = []
         var pending: [String] = []
         var inAdBreak = false
+        var cueAdEndOffset: Double?
+        var adDiscontinuity = false
+        var elapsed = 0.0
         for raw in lines {
             let item = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             if item.isEmpty { pending.append(raw); continue }
             if item.hasPrefix("#") {
-                if item.hasPrefix("#EXT-X-CUE-IN") {
+                if item.uppercased().hasPrefix("#EXT-X-CUE-IN") {
                     if inAdBreak || pending.contains(where: { isAdSignal($0.trimmingCharacters(in: .whitespacesAndNewlines)) }) {
                         inAdBreak = false
-                        pending.removeAll()
-                        continue
+                        cueAdEndOffset = nil
+                        pending = adDiscontinuity ? ["#EXT-X-DISCONTINUITY"] : []
+                        adDiscontinuity = false
                     }
+                    continue
                 }
-                if item.hasPrefix("#EXT-X-CUE-OUT") || isAdSignal(item) {
+                if isCueOutTag(item) {
                     output.append(contentsOf: pending); pending.removeAll()
                     inAdBreak = true
+                    cueAdEndOffset = cueBreakEndOffset(item, elapsed: elapsed)
+                    adDiscontinuity = false
+                    continue
+                }
+                if isAdSignal(item) {
+                    output.append(contentsOf: pending); pending.removeAll()
+                    inAdBreak = true
+                    cueAdEndOffset = nil
+                    adDiscontinuity = false
                     pending.append(raw)
                     continue
                 }
                 if isStandaloneAdTag(item) {
                     output.append(contentsOf: pending); pending.removeAll()
-                    removed += 1
+                    continue
+                }
+                if inAdBreak && isDiscontinuityTag(item) { adDiscontinuity = true }
+                if inAdBreak && item.uppercased() == "#EXT-X-ENDLIST" {
+                    output.append(item)
+                    inAdBreak = false
+                    cueAdEndOffset = nil
+                    pending.removeAll()
                     continue
                 }
                 if isSegmentTag(item) || inAdBreak { pending.append(raw) }
                 else { output.append(contentsOf: pending); pending.removeAll(); output.append(raw) }
                 continue
             }
+            let duration = pendingSegmentDuration(pending)
             if inAdBreak || pending.contains(where: { isAdSignal($0) }) || isAdURL(item) {
                 pending.removeAll()
                 removed += 1
+                elapsed += duration
+                if let cueEndOffset = cueAdEndOffset, elapsed >= cueEndOffset {
+                    inAdBreak = false
+                    cueAdEndOffset = nil
+                    pending = adDiscontinuity ? ["#EXT-X-DISCONTINUITY"] : []
+                    adDiscontinuity = false
+                }
                 continue
             }
             output.append(contentsOf: pending); pending.removeAll(); output.append(raw)
+            elapsed += duration
         }
         if !inAdBreak { output.append(contentsOf: pending) }
         return output.joined(separator: "\n")
+    }
+
+    private static func removeTimedAdRanges(_ content: String, removed: inout Int) -> String {
+        let lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var headers: [String] = []
+        var pending: [String] = []
+        var trailing: [String] = []
+        var segments: [TimedSegment] = []
+        var activeKey = ""
+        var activeMap = ""
+        var elapsed = 0.0
+        var programDateTime: Date?
+        var seenSegment = false
+        var adDateRanges: [String: AdDateRange] = [:]
+        var scteAdStart: Double?
+        var scteAdIntervals: [(start: Double, end: Double)] = []
+
+        for raw in lines {
+            let item = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if item.uppercased().hasPrefix("#EXT-X-PROGRAM-DATE-TIME:") {
+                if let colon = item.firstIndex(of: ":") {
+                    programDateTime = parseDate(String(item[item.index(after: colon)...]))
+                }
+            }
+            if item.uppercased().hasPrefix("#EXT-X-DATERANGE:") {
+                let attributes = attributeList(item)
+                if let id = attributes["ID"], !id.isEmpty {
+                    var range = adDateRanges[id] ?? AdDateRange(
+                        startOffset: elapsed,
+                        startDate: nil,
+                        endDate: nil,
+                        duration: nil,
+                        isAd: false
+                    )
+                    if let value = attributes["START-DATE"], let date = parseDate(value) { range.startDate = date }
+                    if let value = attributes["END-DATE"], let date = parseDate(value) { range.endDate = date }
+                    if let value = attributes["DURATION"], let duration = Double(value), duration > 0 { range.duration = duration }
+                    range.isAd = range.isAd || isAdDateRange(attributes)
+                    adDateRanges[id] = range
+                }
+                if attributes["SCTE35-OUT"] != nil, scteAdStart == nil { scteAdStart = elapsed }
+                if attributes["SCTE35-IN"] != nil, let start = scteAdStart {
+                    scteAdIntervals.append((start: start, end: elapsed))
+                    scteAdStart = nil
+                }
+            }
+            if item.uppercased().hasPrefix("#EXT-X-KEY:") { activeKey = raw }
+            if item.uppercased().hasPrefix("#EXT-X-MAP:") { activeMap = raw }
+
+            guard !item.isEmpty, !item.hasPrefix("#") else {
+                if !seenSegment && !isSegmentScopedTag(item) {
+                    headers.append(raw)
+                } else if seenSegment && item == "#EXT-X-ENDLIST" {
+                    trailing.append(raw)
+                } else {
+                    pending.append(raw)
+                }
+                continue
+            }
+
+            let duration = pending.compactMap(parseDuration).last?.value ?? 0
+            segments.append(TimedSegment(
+                lines: pending + [raw],
+                duration: duration,
+                startOffset: elapsed,
+                programDateTime: programDateTime,
+                keyState: activeKey,
+                mapState: activeMap
+            ))
+            seenSegment = true
+            elapsed += duration
+            if let currentProgramDateTime = programDateTime {
+                programDateTime = currentProgramDateTime.addingTimeInterval(duration)
+            }
+            pending.removeAll()
+        }
+        if seenSegment { trailing.append(contentsOf: pending) }
+        else { headers.append(contentsOf: pending) }
+        guard !segments.isEmpty else { return content }
+
+        var remove = Set<Int>()
+        let firstTimedSegment = segments.first(where: { $0.programDateTime != nil })
+        for range in adDateRanges.values where range.isAd {
+            let duration = range.startDate.flatMap { start in
+                range.endDate.map { $0.timeIntervalSince(start) }
+            } ?? range.duration
+            guard let duration, duration > 0 else { continue }
+            var startOffset = range.startOffset
+            if let startDate = range.startDate,
+               let firstTimedSegment,
+               let firstDate = firstTimedSegment.programDateTime {
+                startOffset = firstTimedSegment.startOffset + startDate.timeIntervalSince(firstDate)
+            }
+            for (index, segment) in segments.enumerated()
+            where segment.startOffset < startOffset + duration && segment.startOffset + segment.duration > startOffset {
+                remove.insert(index)
+            }
+        }
+        for interval in scteAdIntervals where interval.end > interval.start {
+            for (index, segment) in segments.enumerated()
+            where segment.startOffset < interval.end && segment.startOffset + segment.duration > interval.start {
+                remove.insert(index)
+            }
+        }
+        guard !remove.isEmpty else { return content }
+
+        var output = headers
+        var keyState = ""
+        var mapState = ""
+        for (index, segment) in segments.enumerated() {
+            guard !remove.contains(index) else { continue }
+            keyState = appendState(output: &output, tag: "#EXT-X-KEY", current: keyState, next: segment.keyState)
+            mapState = appendState(output: &output, tag: "#EXT-X-MAP", current: mapState, next: segment.mapState)
+            output.append(contentsOf: segment.lines.filter {
+                let line = $0.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+                return !line.hasPrefix("#EXT-X-KEY:") && !line.hasPrefix("#EXT-X-MAP:")
+            })
+        }
+        output.append(contentsOf: trailing)
+        removed += remove.count
+        return output.joined(separator: "\n")
+    }
+
+    private static func isSegmentScopedTag(_ line: String) -> Bool {
+        let upper = line.uppercased()
+        if upper.hasPrefix("#EXT-X-DISCONTINUITY-SEQUENCE") { return false }
+        return [
+            "#EXTINF:", "#EXT-X-BYTERANGE", "#EXT-X-PROGRAM-DATE-TIME:",
+            "#EXT-X-DISCONTINUITY", "#EXT-X-PART:", "#EXT-X-PRELOAD-HINT:",
+            "#EXT-X-KEY:", "#EXT-X-MAP:", "#EXT-X-DATERANGE:", "#EXT-X-CUE-",
+            "#EXT-X-SCTE", "#EXT-OATCLS-SCTE", "#EXT-X-ASSET", "#EXT-X-AD", "#EXT-X-VMAP"
+        ].contains(where: upper.hasPrefix)
+    }
+
+    private static func attributeList(_ line: String) -> [String: String] {
+        let body: String
+        if let colon = line.firstIndex(of: ":") {
+            body = String(line[line.index(after: colon)...])
+        } else {
+            body = line
+        }
+        let pattern = try! NSRegularExpression(pattern: #"(?:^|,)\s*([A-Z0-9-]+)=((?:"[^"]*")|[^,]*)"#, options: [.caseInsensitive])
+        let range = NSRange(body.startIndex..<body.endIndex, in: body)
+        var result: [String: String] = [:]
+        for match in pattern.matches(in: body, range: range) {
+            guard let keyRange = Range(match.range(at: 1), in: body),
+                  let valueRange = Range(match.range(at: 2), in: body) else { continue }
+            let value = String(body[valueRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            result[String(body[keyRange]).uppercased()] = value.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        }
+        return result
+    }
+
+    private static func isAdDateRange(_ attributes: [String: String]) -> Bool {
+        let marker = "\(attributes["ID"] ?? "") \(attributes["CLASS"] ?? "")"
+        return isAdLikeText(marker) || attributes["SCTE35-OUT"] != nil || attributes["SCTE35-IN"] != nil ||
+            attributes["X-ASSET-URI"] != nil || attributes["X-ASSET-LIST"] != nil
+    }
+
+    private static func parseDate(_ value: String) -> Date? {
+        let optionSets: [ISO8601DateFormatter.Options] = [
+            [.withInternetDateTime, .withFractionalSeconds],
+            [.withInternetDateTime]
+        ]
+        for options in optionSets {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = options
+            if let date = formatter.date(from: value) { return date }
+        }
+        return nil
+    }
+
+    private static func appendState(output: inout [String], tag: String, current: String, next: String) -> String {
+        guard current != next else { return current }
+        if !next.isEmpty { output.append(next) }
+        else if tag == "#EXT-X-KEY", !current.isEmpty { output.append("#EXT-X-KEY:METHOD=NONE") }
+        return next
+    }
+
+    private static func isCueOutTag(_ line: String) -> Bool {
+        let upper = line.uppercased()
+        return upper.hasPrefix("#EXT-X-CUE-OUT:") || upper == "#EXT-X-CUE-OUT" ||
+            upper.hasPrefix("#EXT-X-CUE-OUT-CONT:")
+    }
+
+    private static func cueBreakEndOffset(_ line: String, elapsed: Double) -> Double? {
+        let attributes = attributeList(line)
+        let rawDurationPattern = try! NSRegularExpression(
+            pattern: #"^#EXT-X-CUE-OUT:\s*([\d.]+)"#,
+            options: [.caseInsensitive]
+        )
+        let range = NSRange(line.startIndex..<line.endIndex, in: line)
+        let rawDuration = rawDurationPattern.firstMatch(in: line, range: range).flatMap { match in
+            Range(match.range(at: 1), in: line).flatMap { Double(line[$0]) }
+        }
+        let duration = attributes["DURATION"].flatMap(Double.init) ?? rawDuration
+        guard let duration, duration > 0 else { return nil }
+        let elapsedTime = attributes["ELAPSEDTIME"].flatMap(Double.init) ?? 0
+        return elapsed + max(0, duration - elapsedTime)
+    }
+
+    private static func pendingSegmentDuration(_ lines: [String]) -> Double {
+        lines.compactMap(parseDuration).last?.value ?? 0
     }
 
     private static func removeConfiguredAdRules(
@@ -709,7 +960,8 @@ struct M3U8ManifestPurifier {
             let short = current.segments > 0 && (current.segments <= 2 || current.duration < main.duration * 0.18)
             let different = !main.host.isEmpty && !current.host.isEmpty && main.host != current.host
             let differentPath = !main.path.isEmpty && !current.path.isEmpty && main.path != current.path
-            let adLike = current.adLike || different || (current.segments <= 2 && differentPath)
+            let cadenceOutlier = isBoundedCadenceOutlier(groups: groups, index: index, segmentCount: current.segments)
+            let adLike = current.adLike || different || (current.segments <= 2 && differentPath) || cadenceOutlier
             if index != mainIndex && short && adLike {
                 removed += current.segments
             } else {
@@ -717,6 +969,32 @@ struct M3U8ManifestPurifier {
             }
         }
         return output.joined(separator: "\n")
+    }
+
+    private static func isBoundedCadenceOutlier(groups: [[String]], index: Int, segmentCount: Int) -> Bool {
+        guard index > 0, index + 1 < groups.count, (3...12).contains(segmentCount) else { return false }
+        let candidate = groups[index].compactMap(parseDuration).map(\.value)
+        guard candidate.count == segmentCount,
+              let candidateMedian = median(candidate),
+              candidate.allSatisfy({ abs($0 - candidateMedian) <= 0.05 }) else { return false }
+
+        let before = Array(groups[index - 1].compactMap(parseDuration).map(\.value).suffix(12))
+        let after = Array(groups[index + 1].compactMap(parseDuration).map(\.value).prefix(12))
+        guard before.count >= 3, after.count >= 3,
+              let beforeMedian = median(before),
+              let afterMedian = median(after),
+              abs(beforeMedian - afterMedian) <= 0.04 else { return false }
+        return abs(candidateMedian - (beforeMedian + afterMedian) / 2) >= 0.08
+    }
+
+    private static func median(_ values: [Double]) -> Double? {
+        let sorted = values.filter { $0.isFinite && $0 > 0 }.sorted()
+        guard !sorted.isEmpty else { return nil }
+        let middle = sorted.count / 2
+        if sorted.count.isMultiple(of: 2) {
+            return (sorted[middle - 1] + sorted[middle]) / 2
+        }
+        return sorted[middle]
     }
 
     private static func removeDecimalPrecisionGroups(_ content: String, removed: inout Int) -> String {

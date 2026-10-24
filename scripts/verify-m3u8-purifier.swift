@@ -228,6 +228,98 @@ struct VerifyM3U8Purifier {
             frameRateResult.content.contains("main-\($0).ts")
         })
 
+        let dateRangeLines = [
+            "#EXTM3U", "#EXT-X-TARGETDURATION:6", "#EXT-X-PLAYLIST-TYPE:VOD",
+            "#EXT-X-PROGRAM-DATE-TIME:2026-10-24T10:00:00Z",
+            "#EXTINF:6.000,", "https://cdn.example/video/main-1.ts",
+            "#EXTINF:6.000,", "https://cdn.example/video/main-2.ts",
+            "#EXT-X-DATERANGE:ID=\"break-1\",CLASS=\"com.apple.hls.interstitial\",START-DATE=\"2026-10-24T10:00:12Z\",DURATION=12,X-ASSET-URI=\"https://ads.example/ad.m3u8\"",
+            "#EXTINF:6.000,", "https://cdn.example/video/opaque-3.ts",
+            "#EXTINF:6.000,", "https://cdn.example/video/opaque-4.ts",
+            "#EXTINF:6.000,", "https://cdn.example/video/main-5.ts",
+            "#EXT-X-ENDLIST"
+        ]
+        let dateRangeResult = M3U8ManifestPurifier.purify(
+            baseURL: URL(string: "https://cdn.example/video/index.m3u8")!,
+            content: dateRangeLines.joined(separator: "\n")
+        )
+        precondition(dateRangeResult.removedSegmentCount == 2, "DATERANGE should remove only the timed ad segments")
+        precondition(!dateRangeResult.content.contains("opaque-3.ts") && !dateRangeResult.content.contains("opaque-4.ts"))
+        precondition(dateRangeResult.content.contains("main-2.ts") && dateRangeResult.content.contains("main-5.ts"))
+        precondition(!dateRangeResult.content.contains("#EXT-X-DATERANGE:"), "Removed ad date ranges should not be left in the media playlist")
+        precondition(dateRangeResult.content.components(separatedBy: "#EXT-X-ENDLIST").count == 2, "The trailing ENDLIST must remain exactly once")
+
+        var scteLines = ["#EXTM3U", "#EXT-X-TARGETDURATION:6"]
+        for index in 1...2 {
+            scteLines.append("#EXTINF:6.000,")
+            scteLines.append("https://cdn.example/video/main-\(index).ts")
+        }
+        scteLines.append("#EXT-X-DATERANGE:ID=\"splice-1\",CLASS=\"ad-break\",SCTE35-OUT=\"/DAvAAAAAAAAAP/wBQb+AAABQ1//+gA=\"")
+        for index in 1...2 {
+            scteLines.append("#EXTINF:6.000,")
+            scteLines.append("https://cdn.example/video/opaque-ad-\(index).ts")
+        }
+        scteLines.append("#EXT-X-DATERANGE:ID=\"splice-1\",SCTE35-IN=\"/DAvAAAAAAAAAP/wBQb+AAABQ1//+gA=\"")
+        scteLines.append("#EXTINF:6.000,")
+        scteLines.append("https://cdn.example/video/main-3.ts")
+        scteLines.append("#EXT-X-ENDLIST")
+        let scteResult = M3U8ManifestPurifier.purify(
+            baseURL: URL(string: "https://cdn.example/video/index.m3u8")!,
+            content: scteLines.joined(separator: "\n")
+        )
+        precondition(scteResult.removedSegmentCount == 2, "SCTE-35 out/in interval should remove its bounded media segments")
+        precondition(!scteResult.content.contains("opaque-ad-1.ts") && !scteResult.content.contains("opaque-ad-2.ts"))
+        precondition(scteResult.content.contains("main-3.ts"))
+        precondition(!scteResult.content.contains("#EXT-X-DATERANGE:"), "SCTE-35 boundary markers should be removed with the ad interval")
+
+        var cueDurationLines = ["#EXTM3U", "#EXT-X-TARGETDURATION:6"]
+        for index in 1...2 {
+            cueDurationLines.append("#EXTINF:6.000,")
+            cueDurationLines.append("https://cdn.example/video/main-\(index).ts")
+        }
+        cueDurationLines.append("#EXT-X-CUE-OUT:DURATION=12")
+        for index in 1...2 {
+            cueDurationLines.append("#EXTINF:6.000,")
+            cueDurationLines.append("https://cdn.example/video/opaque-\(index).ts")
+        }
+        cueDurationLines.append("#EXTINF:6.000,")
+        cueDurationLines.append("https://cdn.example/video/main-3.ts")
+        cueDurationLines.append("#EXT-X-ENDLIST")
+        let cueDurationResult = M3U8ManifestPurifier.purify(
+            baseURL: URL(string: "https://cdn.example/video/index.m3u8")!,
+            content: cueDurationLines.joined(separator: "\n")
+        )
+        precondition(cueDurationResult.removedSegmentCount == 2, "A bounded cue break should end at its declared duration without CUE-IN")
+        precondition(!cueDurationResult.content.contains("opaque-1.ts") && !cueDurationResult.content.contains("opaque-2.ts"))
+        precondition(cueDurationResult.content.contains("main-3.ts"))
+
+        let statefulAdLines = [
+            "#EXTM3U", "#EXT-X-TARGETDURATION:6", "#EXT-X-PLAYLIST-TYPE:VOD",
+            "#EXT-X-KEY:METHOD=AES-128,URI=\"main-before.key\"",
+            "#EXT-X-MAP:URI=\"main-before-init.mp4\"",
+            "#EXTINF:6.000,", "https://cdn.example/video/main-before.ts",
+            "#EXT-X-DATERANGE:ID=\"break-state\",CLASS=\"ad-break\",START-DATE=\"2026-10-24T10:00:06Z\",DURATION=12",
+            "#EXTINF:6.000,", "https://cdn.example/video/opaque-state-1.ts",
+            "#EXT-X-KEY:METHOD=AES-128,URI=\"ad.key\"",
+            "#EXT-X-MAP:URI=\"ad-init.mp4\"",
+            "#EXTINF:6.000,", "https://cdn.example/video/opaque-state-2.ts",
+            "#EXT-X-DISCONTINUITY",
+            "#EXT-X-KEY:METHOD=AES-128,URI=\"main-after.key\"",
+            "#EXT-X-MAP:URI=\"main-after-init.mp4\"",
+            "#EXTINF:6.000,", "https://cdn.example/video/main-after.ts",
+            "#EXT-X-ENDLIST"
+        ]
+        let statefulAdResult = M3U8ManifestPurifier.purify(
+            baseURL: URL(string: "https://cdn.example/video/index.m3u8")!,
+            content: statefulAdLines.joined(separator: "\n")
+        )
+        precondition(statefulAdResult.removedSegmentCount == 2, "Ad markers must not inflate the removed media-segment count")
+        precondition(!statefulAdResult.content.contains("ad.key") && !statefulAdResult.content.contains("ad-init.mp4"))
+        precondition(statefulAdResult.content.contains("main-before.key") && statefulAdResult.content.contains("main-after.key"))
+        precondition(statefulAdResult.content.contains("main-before-init.mp4") && statefulAdResult.content.contains("main-after-init.mp4"))
+        precondition(statefulAdResult.content.contains("#EXT-X-KEY:METHOD=AES-128,URI=\"main-after.key\"\n#EXT-X-MAP:URI=\"main-after-init.mp4\"\n#EXT-X-DISCONTINUITY"))
+        precondition(statefulAdResult.content.hasSuffix("#EXT-X-ENDLIST"))
+
         var targetEpisodeLines = ["#EXTM3U", "#EXT-X-TARGETDURATION:6", "#EXT-X-DISCONTINUITY"]
         for index in 1...20 {
             targetEpisodeLines.append("#EXTINF:3.958,")
@@ -370,6 +462,35 @@ struct VerifyM3U8Purifier {
         precondition(uniformResult.removedSegmentCount == 6)
         precondition(!uniformResult.content.contains("ad-a-0.ts"))
         precondition(!uniformResult.content.contains("ad-b-0.ts"))
+
+        var boundedCadenceLines = ["#EXTM3U", "#EXT-X-TARGETDURATION:5", "#EXT-X-PLAYLIST-TYPE:VOD"]
+        for index in 0..<105 {
+            boundedCadenceLines.append("#EXTINF:4.000,")
+            boundedCadenceLines.append("https://cdn.example/video/main-before-\(index).ts")
+        }
+        boundedCadenceLines.append("#EXT-X-DISCONTINUITY")
+        let boundedAdDurations = [4.080, 4.120, 4.080, 4.120, 4.080, 4.120, 4.080, 4.120, 4.080]
+        for (index, duration) in boundedAdDurations.enumerated() {
+            boundedCadenceLines.append(String(format: "#EXTINF:%.3f,", duration))
+            boundedCadenceLines.append("https://cdn.example/video/opaque-\(index).ts?token=opaque-\(index)")
+        }
+        boundedCadenceLines.append("#EXT-X-DISCONTINUITY")
+        for index in 0..<105 {
+            boundedCadenceLines.append("#EXTINF:4.000,")
+            boundedCadenceLines.append("https://cdn.example/video/main-after-\(index).ts")
+        }
+        boundedCadenceLines.append("#EXT-X-ENDLIST")
+        let boundedCadenceResult = M3U8ManifestPurifier.purify(
+            baseURL: URL(string: "https://cdn.example/video/index.m3u8")!,
+            content: boundedCadenceLines.joined(separator: "\n")
+        )
+        precondition(
+            boundedCadenceResult.removedSegmentCount == boundedAdDurations.count,
+            "A bounded single-group cadence outlier should be removed, got \(boundedCadenceResult.removedSegmentCount)"
+        )
+        precondition(!boundedCadenceResult.content.contains("opaque-0.ts"))
+        precondition(boundedCadenceResult.content.contains("main-before-104.ts"))
+        precondition(boundedCadenceResult.content.contains("main-after-0.ts"))
 
         let originalGuaziURL = "https://guazi.example/video/index.m3u8?token=original"
         let requestsBeforeGuazi = NetworkManager.shared.requestCount

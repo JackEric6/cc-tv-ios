@@ -4,6 +4,7 @@ Actions 运行本身保存在 GitHub；此文件将重要构建与源码提交�
 
 | 时间（UTC） | 分支 | 源码提交 | 结果 | Actions 运行 |
 | --- | --- | --- | --- | --- |
+| 2026-10-25 | `codex/ios-1.0.5-m3u8` | 待提交 | 待 Actions 构建；版本 `1.0.5 (7)`，按 Windows 版增强 M3U8 时间区间及异常分片组广告过滤 | 待运行 |
 | 2026-10-13 10:28 | `codex/ios-1.0.3-fixes` | `0624845` | 成功；发布构建版本 `1.0.3 (4)`，回归校验、Release 编译、元数据核验及 IPA 打包完成 | [38383049363](https://github.com/JackEric6/cc-tv-ios/actions/runs/38383049363) |
 | 2026-10-13 09:22 | `codex/danmu-speed-search-stability` | `8435fb4` | 成功；发布构建版本 `1.0.2 (3)`，39 项校验、Release 编译、元数据核验及 IPA 打包完成 | [38375356331](https://github.com/JackEric6/cc-tv-ios/actions/runs/38375356331) |
 | 2026-10-13 08:32 | `codex/danmaku-speed` | `6b191a6` | 成功；发布构建版本 `1.0.1 (2)`，校验、Release 编译、元数据核验及 IPA 上传完成 | [38369452960](https://github.com/JackEric6/cc-tv-ios/actions/runs/38369452960) |
@@ -13,8 +14,8 @@ Actions 运行本身保存在 GitHub；此文件将重要构建与源码提交�
 
 ## 版本标记
 
-- `MARKETING_VERSION`: `1.0.3`
-- `CURRENT_PROJECT_VERSION`: `4`
+- `MARKETING_VERSION`: `1.0.5`
+- `CURRENT_PROJECT_VERSION`: `7`
 - 版本字段定义在 `project.yml`；日常迭代由 Git commit 和 Actions run 追踪。发布到需要唯一构建号的平台前，应先提升构建号。
 
 ## 构建产物
