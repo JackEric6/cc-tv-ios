@@ -547,18 +547,6 @@
       "disabled": false
     },
     {
-      "key": "jianpian",
-      "name": "荐片",
-      "type": 1,
-      "api": "https://fan123.hzhnl.com",
-      "searchable": 1,
-      "quickSearch": 1,
-      "changeable": 0,
-      "filterable": 0,
-      "timeout": 30,
-      "icon": "https://img.ypfbj.com/favicon.ico"
-    },
-    {
       "key": "fhw88",
       "name": "鑫同",
       "type": 1,

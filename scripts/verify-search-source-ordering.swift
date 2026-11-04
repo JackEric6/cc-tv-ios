@@ -14,8 +14,6 @@ struct VerifySearchSourceOrdering {
             Source(key: "custom_a", name: "自定义甲", marker: "other-a"),
             Source(key: "xgzy", name: "西瓜", marker: "xigua"),
             Source(key: "guazi", name: "瓜子", marker: "guazi"),
-            Source(key: "fan_jianpian", name: "荐片原生", marker: "jianpian"),
-            Source(key: "jianpian", name: "荐片", marker: "jianpian-api"),
             Source(key: "fhw88", name: "鑫同", marker: "xintong"),
             Source(key: "fan_nomi", name: "🍓糯米", marker: "nuomi"),
             Source(key: "cz4k", name: "厂长", marker: "changzhang"),
@@ -35,7 +33,7 @@ struct VerifySearchSourceOrdering {
             sourceName: \.name
         )
         precondition(sorted.map(\.marker) == [
-            "guazi", "jianpian", "jianpian-api", "xigua", "feifan", "baofeng", "tiantang",
+            "guazi", "xigua", "feifan", "baofeng", "tiantang",
             "liangzi", "ruyi", "xintong", "other-a", "other-b", "360", "changzhang", "moli",
             "cheese", "nuomi"
         ])

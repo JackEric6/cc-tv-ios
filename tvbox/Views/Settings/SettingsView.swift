@@ -119,7 +119,7 @@ struct SettingsView: View {
                         Divider().background(Color.white.opacity(0.1))
                         SettingsRow(icon: "person.crop.circle", title: "关于", value: CongcongBrand.credit, action: nil)
                         Divider().background(Color.white.opacity(0.1))
-                        SettingsRow(icon: "info.circle", title: "版本", value: "1.0.0", action: nil)
+                        SettingsRow(icon: "info.circle", title: "版本", value: "1.0.6", action: nil)
                         Divider().background(Color.white.opacity(0.1))
                         SettingsRow(icon: "globe", title: "站点数量", value: "\(apiConfig.sourceBeanList.count)", action: nil)
                         Divider().background(Color.white.opacity(0.1))

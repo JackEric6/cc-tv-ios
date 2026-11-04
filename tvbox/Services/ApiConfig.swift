@@ -672,9 +672,13 @@ class ApiConfig: ObservableObject {
         guard activeLoadToken == loadToken else { return }
 
         if includeSources {
-            // 解析站点列表
+            // 解析站点列表；玉兔与荐片及其旧别名不再进入运行时源清单。
+            let removedSourceKeys: Set<String> = ["yutu", "jianpian", "fan_jianpian", "fan_jp"]
             var sources = (config.sites ?? [])
-                .filter { $0.key?.caseInsensitiveCompare("yutu") != .orderedSame }
+                .filter {
+                    guard let key = $0.key?.lowercased() else { return false }
+                    return !removedSourceKeys.contains(key)
+                }
                 .map { self.makeSourceBean(from: $0) }
             // 瓜子使用 iOS 专用加密服务。远程配置中的同名条目可能是旧的
             // JAR/隐藏定义，必须由内置 iOS 定义覆盖，才能进入聚合搜索。
@@ -685,7 +689,7 @@ class ApiConfig: ObservableObject {
             }
             if let bundledSites = Self.loadBundledConfig(named: "xgzy_config_all")?.sites {
                 let migratedKeys: Set<String> = [
-                    "jianpian", "ffzy", "fhw88", "cz4k", "fan_moli", "fan_cheese", "fan_nomi", "ikanbot", "zanpian"
+                    "ffzy", "fhw88", "cz4k", "fan_moli", "fan_cheese", "fan_nomi", "ikanbot", "zanpian"
                 ]
                 for site in bundledSites {
                     guard let key = site.key?.lowercased(), migratedKeys.contains(key) else { continue }
@@ -705,7 +709,10 @@ class ApiConfig: ObservableObject {
                       let bundled = Self.loadBundledConfig(named: "xgzy_config_all"),
                       let bundledSites = bundled.sites {
                 let bundledSources = bundledSites
-                    .filter { $0.key?.caseInsensitiveCompare("yutu") != .orderedSame }
+                    .filter {
+                        guard let key = $0.key?.lowercased() else { return false }
+                        return !removedSourceKeys.contains(key)
+                    }
                     .map { self.makeSourceBean(from: $0) }
                 if !bundledSources.isEmpty {
                     self.sourceBeanList = bundledSources
@@ -713,7 +720,7 @@ class ApiConfig: ObservableObject {
             }
 
             if !self.sourceBeanList.isEmpty {
-                // 保留已选择的首页源；没有有效选择时按瓜子、西瓜、荐片顺序初始化。
+                // 保留已选择的首页源；没有有效选择时按瓜子、西瓜顺序初始化。
                 let storedHomeKey = UserDefaults.standard.string(forKey: HawkConfig.HOME_API)
                 let savedHomeKey = HomeSourceSelectionPolicy.startupKey(savedKey: storedHomeKey)
                 if savedHomeKey != storedHomeKey, let savedHomeKey {
@@ -726,17 +733,14 @@ class ApiConfig: ObservableObject {
                    }) {
                     self.homeSourceBean = selectedSource
                 } else {
-                    // 瓜子为默认首页；西瓜和荐片按顺序作为失败回退源。
+                    // 瓜子为默认首页，西瓜作为备用首页。
                     let guazi = self.sourceBeanList.first(where: {
                         $0.key.caseInsensitiveCompare("guazi") == .orderedSame && $0.isSelectable
                     })
                     let xigua = self.sourceBeanList.first(where: { $0.key == "xgzy" && $0.isSelectable })
-                    let jianpian = self.sourceBeanList.first(where: {
-                        $0.key.caseInsensitiveCompare("jianpian") == .orderedSame && $0.isSelectable
-                    })
-                        ?? self.sourceBeanList.first(where: { $0.isSelectable })
+                    let fallback = self.sourceBeanList.first(where: { $0.isSelectable })
                         ?? self.sourceBeanList.first
-                    self.homeSourceBean = guazi ?? xigua ?? jianpian
+                    self.homeSourceBean = guazi ?? xigua ?? fallback
                     if let defaultSource = self.homeSourceBean {
                         UserDefaults.standard.set(defaultSource.key, forKey: HawkConfig.HOME_API)
                     }

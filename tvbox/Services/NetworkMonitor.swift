@@ -23,9 +23,10 @@ final class NetworkMonitor: ObservableObject {
         case unknown = "未知"
     }
     
-    private let monitor = NWPathMonitor()
+    private var monitor = NWPathMonitor()
     private let monitorQueue = DispatchQueue(label: "com.tvbox.networkmonitor", qos: .utility)
     private var wasDisconnected = false
+    private var lastConnectedType: ConnectionType = .unknown
     
     private init() {
         startMonitoring()
@@ -41,16 +42,30 @@ final class NetworkMonitor: ObservableObject {
                 self.isConnected = connected
                 self.connectionType = Self.resolveConnectionType(path)
                 
-                if connected && !previouslyConnected {
-                    self.networkRestoredPublisher.send()
-                }
-                
-                if !connected {
+                let connectionTypeChanged = connected && self.lastConnectedType != .unknown
+                    && self.lastConnectedType != self.connectionType
+                if connected {
+                    self.lastConnectedType = self.connectionType
+                    if !previouslyConnected || self.wasDisconnected || connectionTypeChanged {
+                        self.wasDisconnected = false
+                        self.networkRestoredPublisher.send()
+                    }
+                } else {
                     self.wasDisconnected = true
                 }
             }
         }
         monitor.start(queue: monitorQueue)
+    }
+
+    /// 重新创建路径监视器。应用从后台回到前台或系统切换 Wi-Fi/蜂窝网络
+    /// 时调用，确保旧的 NWPath 状态不会阻塞后续恢复信号。
+    func restartMonitoring() {
+        monitor.cancel()
+        monitor = NWPathMonitor()
+        wasDisconnected = false
+        lastConnectedType = .unknown
+        startMonitoring()
     }
     
     private static func resolveConnectionType(_ path: NWPath) -> ConnectionType {

@@ -72,6 +72,8 @@ class DetailViewModel: ObservableObject {
     /// KKT影视播放器页解析任务，避免切换剧集后旧地址回写。
     private var playableResolveTask: Task<Void, Never>?
     private var danmakuPreloadTask: Task<Void, Never>?
+    private var danmakuPrefetchTask: Task<Void, Never>?
+    private var danmakuPrefetchKey: String?
     private var playableResolveToken = UUID()
     private var purifierFallbackURL: String?
     private var activePlaybackHeaders: [String: String]?
@@ -117,7 +119,10 @@ class DetailViewModel: ObservableObject {
             .sink { [weak self] in
                 guard let self else { return }
                 Task { @MainActor [weak self] in
-                    await self?.retryCurrentDetailIfNeeded()
+                    guard let self else { return }
+                    NetworkManager.shared.reloadSessionForNetworkRecovery()
+                    DanmuService.shared.reloadSessionForProxySetting()
+                    await self.retryCurrentDetailIfNeeded(force: true)
                 }
             }
     }
@@ -128,6 +133,12 @@ class DetailViewModel: ObservableObject {
         preferredPlaybackState: VodPlaybackState? = nil,
         autoplay: Bool = false
     ) async {
+        let isDifferentVideo = lastVideo?.id != video.id || lastVideo?.sourceKey != video.sourceKey
+        if isDifferentVideo {
+            danmakuPrefetchTask?.cancel()
+            danmakuPrefetchTask = nil
+            danmakuPrefetchKey = nil
+        }
         // SwiftUI's task modifier runs again when a detail page reappears.
         // If this ViewModel still owns a valid playback session, keep the
         // parsed detail and playable URL. Re-fetching here resets resume state
@@ -992,11 +1003,55 @@ class DetailViewModel: ObservableObject {
         let episode = (vodInfo?.currentEpisode?.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty, !episode.isEmpty else { return }
 
-        danmakuPreloadTask = Task { @MainActor in
-            _ = await DanmuService.shared.loadCues(title: title, episode: episode)
+        let currentIndex = selectedEpisodeIndex
+        let episodes = currentEpisodes
+        let prefetchKey = DanmakuCacheKey.make(title: title, episode: episodes.first?.name ?? "")
+            ?? "\(title.lowercased())"
+        danmakuPreloadTask = Task { @MainActor [weak self] in
+            let cues = await DanmuService.shared.loadCues(title: title, episode: episode)
+            guard !Task.isCancelled, !cues.isEmpty, currentIndex == 0 else { return }
+            self?.prefetchFollowingDanmaku(
+                title: title,
+                episodes: episodes,
+                cacheKey: prefetchKey
+            )
         }
         #endif
     }
+
+    #if os(iOS)
+    /// 首集弹幕成功后，后台预取后续剧集。DanmuService 自带按片名/集数
+    /// 的持久化跨源缓存，网络短暂可用时即可把后续集缓存下来。
+    private func prefetchFollowingDanmaku(
+        title: String,
+        episodes: [VodInfo.Episode],
+        cacheKey: String
+    ) {
+        guard episodes.count > 1, danmakuPrefetchKey != cacheKey else { return }
+        danmakuPrefetchTask?.cancel()
+        danmakuPrefetchKey = cacheKey
+        let followingEpisodes = Array(episodes.dropFirst())
+        danmakuPrefetchTask = Task { @MainActor in
+            let batchSize = 3
+            for start in stride(from: 0, to: followingEpisodes.count, by: batchSize) {
+                guard !Task.isCancelled else { return }
+                let batch = followingEpisodes[start..<min(start + batchSize, followingEpisodes.count)]
+                await withTaskGroup(of: Void.self) { group in
+                    for item in batch {
+                        group.addTask {
+                            guard !Task.isCancelled else { return }
+                            _ = await DanmuService.shared.loadCues(
+                                title: title,
+                                episode: item.name
+                            )
+                        }
+                    }
+                    await group.waitForAll()
+                }
+            }
+        }
+    }
+    #endif
 
     var currentPlaybackHeaders: [String: String] {
         guard let source = currentSource, let mediaURL = currentResolvedMediaURL else { return [:] }

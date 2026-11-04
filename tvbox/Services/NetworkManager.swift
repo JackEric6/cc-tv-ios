@@ -80,6 +80,14 @@ class NetworkManager {
         session = URLSession(configuration: config)
     }
 
+    /// Rebuild the request session after a Wi-Fi/cellular handoff or a
+    /// foreground transition. URLSession can retain a dead route for a short
+    /// period, so a fresh session is required before retrying playback/API
+    /// requests.
+    func reloadSessionForNetworkRecovery() {
+        reloadSessionForProxySetting()
+    }
+
     /// GET 请求获取字符串，支持自动重试。
     func getString(
         from urlString: String,

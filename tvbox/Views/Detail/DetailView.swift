@@ -164,9 +164,12 @@ struct DetailView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 Task {
-                    // 仅重试此前明确因网络失败的详情请求；正常播放回到前台时
-                    // 不重建详情和播放器，避免出现短暂黑屏或从头播放。
-                    await viewModel.retryCurrentDetailIfNeeded()
+                    // 网络切换或后台挂起后，旧 URLSession/播放器连接可能已经失效。
+                    // 等系统完成前台布局后强制重新验证当前集，ViewModel 会保留
+                    // 当前线路、集数和已保存进度，不会回到第一集。
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    guard !Task.isCancelled else { return }
+                    await viewModel.retryCurrentDetailIfNeeded(force: true)
                 }
                 return
             }

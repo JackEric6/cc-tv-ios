@@ -354,13 +354,13 @@ jobs:
           import json
           sources = json.loads(source_config.read_text(encoding="utf-8"))["sites"]
           project_spec = Path("project.yml").read_text(encoding="utf-8")
-          assert 'CURRENT_PROJECT_VERSION: "7"' in project_spec
-          assert 'MARKETING_VERSION: "1.0.5"' in project_spec
-          assert len(sources) == 48
-          assert len({item["key"] for item in sources}) == 48
-          assert all(item["key"] != "yutu" for item in sources)
+          assert 'CURRENT_PROJECT_VERSION: "8"' in project_spec
+          assert 'MARKETING_VERSION: "1.0.6"' in project_spec
+          assert len(sources) == 47
+          assert len({item["key"] for item in sources}) == 47
+          assert all(item["key"] not in {"yutu", "jianpian", "fan_jianpian", "fan_jp"} for item in sources)
           expected_search_sources = {
-              "guazi", "jianpian", "xgzy", "ffzy", "bfzy", "dyttzy",
+              "guazi", "xgzy", "ffzy", "bfzy", "dyttzy",
               "lzi", "360zy", "fhw88", "cz4k", "fan_moli", "fan_cheese", "fan_nomi", "ikanbot", "zanpian",
           }
           assert expected_search_sources.issubset({item["key"] for item in sources})
@@ -381,8 +381,8 @@ jobs:
           assert info["CFBundleExecutable"] == "CongcongTV"
           assert info["CFBundlePackageType"] == "APPL"
           assert info["CFBundleDisplayName"] == "CongcongTV"
-          assert info["CFBundleShortVersionString"] == "1.0.5"
-          assert info["CFBundleVersion"] == "7"
+          assert info["CFBundleShortVersionString"] == "1.0.6"
+          assert info["CFBundleVersion"] == "8"
           assert info["MinimumOSVersion"] == "17.0"
           assert (app / info["CFBundleExecutable"]).is_file()
           assert (app / "xgzy_config_all.json").is_file()

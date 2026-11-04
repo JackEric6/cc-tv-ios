@@ -1679,10 +1679,11 @@ private struct KSPlayerUIView: UIViewRepresentable {
             view.configuredPlaybackHeaders = playbackHeaders
             view.configuredPlaybackSessionToken = playbackSessionToken
         }
-        // KSPlayer configures the audio session too, but doing it here
-        // keeps background audio available across view reattachment.
+        // KSPlayer configures the audio session too. This app is foreground-only
+        // for VOD: returning to the desktop must pause instead of continuing
+        // audio in the background.
         KSOptions.setAudioSession()
-        KSOptions.canBackgroundPlay = true
+        KSOptions.canBackgroundPlay = false
         // KSPlayer couples this flag to both prepareToPlay() and playback.
         // Keep its native initialization/autoplay path enabled.
         KSOptions.isAutoPlay = true
@@ -1704,7 +1705,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
         )
         view.desiredPlaybackRate = initialRate
         options.startPlayRate = initialRate
-        options.registerRemoteControll = true
+        options.registerRemoteControll = false
         // 本应用只提供点播，不启用画中画；尤其不能让播放器在内联状态下
         // 因切后台或系统事件自动进入 PiP。
         options.canStartPictureInPictureAutomaticallyFromInline = false
@@ -1832,6 +1833,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
         private var selectedAspectRatio: PlaybackAspectRatio = .original
         private var volumeButtonState = PlaybackVolumeState()
         private var verticalSeekConstraints: [NSLayoutConstraint] = []
+        private var appWillResignActiveObserver: NSObjectProtocol?
 
         init(
             onProgressChanged: ((Double, Double?) -> Void)?,
@@ -1878,6 +1880,21 @@ private struct KSPlayerUIView: UIViewRepresentable {
             self.onDanmakuEnabledChanged = onDanmakuEnabledChanged
             danmakuSettings.enabled = danmakuEnabled
             danmakuSettings.save()
+            appWillResignActiveObserver = NotificationCenter.default.addObserver(
+                forName: UIApplication.willResignActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                // 点播不允许在后台继续播放；暂停当前 KSPlayer 会话而不销毁
+                // 播放器，回到前台后由详情页的网络/会话恢复逻辑重新验证。
+                self?.retainedPlayerView?.playerLayer?.pause()
+            }
+        }
+
+        deinit {
+            if let appWillResignActiveObserver {
+                NotificationCenter.default.removeObserver(appWillResignActiveObserver)
+            }
         }
 
         func configure(_ view: IOSVideoPlayerView) {
@@ -2512,8 +2529,9 @@ private struct KSPlayerUIView: UIViewRepresentable {
             toolbar.axis = .horizontal
             toolbar.alignment = .center
             toolbar.distribution = .fill
-            toolbar.spacing = 4
-            toolbar.setCustomSpacing(10, after: toolbar.playbackRateButton)
+            let padLayout = UIDevice.current.userInterfaceIdiom == .pad
+            toolbar.spacing = padLayout ? 10 : 5
+            toolbar.setCustomSpacing(padLayout ? 16 : 10, after: toolbar.playbackRateButton)
             toolbar.timeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             toolbar.timeLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
             ensureWidthConstraint(toolbar.playbackRateButton, constant: 28, relation: .equal)
@@ -2627,7 +2645,11 @@ private struct KSPlayerUIView: UIViewRepresentable {
             button.tintColor = .white
             button.accessibilityLabel = label
             button.translatesAutoresizingMaskIntoConstraints = false
-            ensureWidthConstraint(button, constant: 24, relation: .equal)
+            ensureWidthConstraint(
+                button,
+                constant: UIDevice.current.userInterfaceIdiom == .pad ? 34 : 28,
+                relation: .equal
+            )
             button.backgroundColor = .clear
             button.layer.backgroundColor = UIColor.clear.cgColor
             button.layer.shadowColor = UIColor.clear.cgColor
@@ -2653,7 +2675,10 @@ private struct KSPlayerUIView: UIViewRepresentable {
             button.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
             button.accessibilityLabel = label
             button.translatesAutoresizingMaskIntoConstraints = false
-            ensureWidthConstraint(button, constant: min(width, 32), relation: .equal)
+            let resolvedWidth = UIDevice.current.userInterfaceIdiom == .pad
+                ? max(width, 52)
+                : min(width, 40)
+            ensureWidthConstraint(button, constant: resolvedWidth, relation: .equal)
             button.backgroundColor = .clear
             button.layer.backgroundColor = UIColor.clear.cgColor
             button.layer.shadowColor = UIColor.clear.cgColor
@@ -2676,7 +2701,11 @@ private struct KSPlayerUIView: UIViewRepresentable {
             button.accessibilityLabel = label
             button.accessibilityHint = "轻点设置当前时间，长按清除标记"
             button.translatesAutoresizingMaskIntoConstraints = false
-            ensureWidthConstraint(button, constant: 48, relation: .equal)
+            ensureWidthConstraint(
+                button,
+                constant: UIDevice.current.userInterfaceIdiom == .pad ? 64 : 52,
+                relation: .equal
+            )
             button.backgroundColor = .clear
             button.layer.backgroundColor = UIColor.clear.cgColor
             button.layer.shadowColor = UIColor.clear.cgColor

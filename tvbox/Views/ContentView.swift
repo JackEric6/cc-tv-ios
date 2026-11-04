@@ -38,6 +38,9 @@ struct ContentView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
+            NetworkMonitor.shared.restartMonitoring()
+            NetworkManager.shared.reloadSessionForNetworkRecovery()
+            DanmuService.shared.reloadSessionForProxySetting()
             appState.recoverConfigOnForeground()
         }
     }

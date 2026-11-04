@@ -319,10 +319,6 @@ class HomeViewModel: ObservableObject {
         source.key.caseInsensitiveCompare("guazi") == .orderedSame
     }
 
-    private func isJianpianSource(_ source: SourceBean) -> Bool {
-        SearchSourceGroup.classify(sourceKey: source.key, sourceName: source.name) == .jianpian
-    }
-
     private func scheduleInitialLoadRetry() {
         guard initialLoadRetryTask == nil else { return }
         let attempt = initialLoadRetryAttempt
@@ -509,7 +505,7 @@ class HomeViewModel: ObservableObject {
         refreshInFlight = true
         defer { refreshInFlight = false }
 
-        // 用户刷新时先重试首选源；若瓜子仍无内容，本轮再依次尝试西瓜和荐片。
+        // 用户刷新时先重试首选源；若瓜子仍无内容，本轮再尝试西瓜。
         fallbackPreferredSourceKey = nil
         fallbackHomeSourceKey = nil
         refreshGeneration &+= 1
@@ -586,7 +582,7 @@ class HomeViewModel: ObservableObject {
         }
     }
 
-    /// 瓜子不可用时依次尝试西瓜、荐片；刷新会清除此覆盖并重试瓜子。
+    /// 瓜子不可用时尝试西瓜；刷新会清除此覆盖并重试瓜子。
     private func fallbackFromGuazi(
         preferredSource: SourceBean,
         expectedLoadGeneration: Int,
@@ -600,7 +596,7 @@ class HomeViewModel: ObservableObject {
         }
 
         let config = ApiConfig.shared
-        let fallbackSources = [SearchSourceGroup.xigua, .jianpian].compactMap { group in
+        let fallbackSources = [SearchSourceGroup.xigua].compactMap { group in
             config.sourceBeanList.first(where: {
                 SearchSourceGroup.classify(sourceKey: $0.key, sourceName: $0.name) == group
                     && $0.isSelectable
