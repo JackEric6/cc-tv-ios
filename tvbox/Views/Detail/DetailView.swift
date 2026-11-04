@@ -25,6 +25,7 @@ struct DetailView: View {
     @State private var lastPersistedProgress: Double = 0
     @State private var playbackSessionToken = UUID()
     @State private var didSkipOutroForEpisode = false
+    @State private var currentPlaybackDuration: Double?
     @State private var markerRevision = 0
     @State private var isCollected = false
     @State private var showEpisodePicker = false
@@ -182,8 +183,12 @@ struct DetailView: View {
                 FullScreenPlayerView(
                     urlString: url,
                     startPosition: viewModel.currentPlaybackSeconds(),
-                    onProgressChanged: { [playbackSessionToken] seconds, _ in
-                        handlePlaybackProgress(seconds, sessionToken: playbackSessionToken)
+                    onProgressChanged: { [playbackSessionToken] seconds, duration in
+                        handlePlaybackProgress(
+                            seconds,
+                            duration: duration,
+                            sessionToken: playbackSessionToken
+                        )
                     },
                     onPlaybackEnded: { [playbackSessionToken] in
                         playNextEpisodeIfNeeded(sessionToken: playbackSessionToken)
@@ -242,8 +247,12 @@ struct DetailView: View {
                     startPosition: effectiveStartPosition,
                     playbackSessionToken: playbackSessionToken,
                     isResolvingPlayback: viewModel.isResolvingPlaybackURL,
-                    onProgressChanged: { [playbackSessionToken] seconds, _ in
-                        handlePlaybackProgress(seconds, sessionToken: playbackSessionToken)
+                    onProgressChanged: { [playbackSessionToken] seconds, duration in
+                        handlePlaybackProgress(
+                            seconds,
+                            duration: duration,
+                            sessionToken: playbackSessionToken
+                        )
                     },
                     onPlaybackEnded: { [playbackSessionToken] in
                         playNextEpisodeIfNeeded(sessionToken: playbackSessionToken)
@@ -953,12 +962,20 @@ struct DetailView: View {
     }
 
     private var outroMarker: Double {
-        UserDefaults.standard.double(forKey: "congcong.playback.outro.\(playbackMarkerKey)")
+        UserDefaults.standard.double(forKey: outroMarkerStorageKey)
+    }
+
+    private var outroMarkerStorageKey: String {
+        "congcong.playback.outroRemaining.v2.\(playbackMarkerKey)"
+    }
+
+    private var legacyOutroMarkerStorageKey: String {
+        "congcong.playback.outro.\(playbackMarkerKey)"
     }
 
     private var outroMarkerLabel: String {
         _ = markerRevision
-        return outroMarker > 0 ? "片尾 \(Int(outroMarker).durationString)" : "片尾"
+        return outroMarker > 0 ? "片尾 -\(Int(outroMarker).durationString)" : "片尾"
     }
 
     private var effectiveStartPosition: Double {
@@ -977,8 +994,18 @@ struct DetailView: View {
 
     private func markOutro() {
         let position = max(viewModel.currentPlaybackSeconds(), 0)
-        guard position.isFinite, position > 0 else { return }
-        UserDefaults.standard.set(position, forKey: "congcong.playback.outro.\(playbackMarkerKey)")
+        guard position.isFinite,
+              position > 0,
+              let duration = currentPlaybackDuration,
+              let remaining = PlaybackOutroPolicy.remainingTime(
+                currentTime: position,
+                duration: duration
+              ),
+              remaining > 0 else {
+            return
+        }
+        UserDefaults.standard.set(remaining, forKey: outroMarkerStorageKey)
+        UserDefaults.standard.removeObject(forKey: legacyOutroMarkerStorageKey)
         markerRevision += 1
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         if canPlayNextEpisode {
@@ -995,7 +1022,8 @@ struct DetailView: View {
     }
 
     private func resetOutro() {
-        UserDefaults.standard.removeObject(forKey: "congcong.playback.outro.\(playbackMarkerKey)")
+        UserDefaults.standard.removeObject(forKey: outroMarkerStorageKey)
+        UserDefaults.standard.removeObject(forKey: legacyOutroMarkerStorageKey)
         markerRevision += 1
         didSkipOutroForEpisode = false
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -1040,14 +1068,27 @@ struct DetailView: View {
         )
     }
 
-    private func handlePlaybackProgress(_ seconds: Double, sessionToken: UUID? = nil) {
+    private func handlePlaybackProgress(
+        _ seconds: Double,
+        duration: Double? = nil,
+        sessionToken: UUID? = nil
+    ) {
         if let sessionToken, sessionToken != playbackSessionToken {
             return
+        }
+        if let duration, duration.isFinite, duration > 0,
+           currentPlaybackDuration.map({ abs($0 - duration) > 1 }) ?? true {
+            currentPlaybackDuration = duration
         }
         viewModel.updatePlaybackProgress(seconds: seconds)
         if !didSkipOutroForEpisode,
            outroMarker > 0,
-           seconds >= outroMarker,
+           let duration = currentPlaybackDuration,
+           PlaybackOutroPolicy.shouldAdvance(
+                currentTime: seconds,
+                duration: duration,
+                remainingTime: outroMarker
+           ),
            canPlayNextEpisode {
             didSkipOutroForEpisode = true
             flushPlaybackHistoryBeforeSwitch()
@@ -1087,6 +1128,7 @@ struct DetailView: View {
         playbackSessionToken = UUID()
         lastPersistedProgress = 0
         didSkipOutroForEpisode = false
+        currentPlaybackDuration = nil
     }
 
     /// 在切换线路或剧集前，先把旧播放器会话的最新位置落盘，避免短会话丢失进度。
