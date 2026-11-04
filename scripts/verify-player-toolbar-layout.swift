@@ -4,36 +4,36 @@ import Foundation
 struct VerifyPlayerToolbarLayout {
     private static let phoneWidths: [PlaybackToolbarControl: Double] = [
         .rewind: PlaybackToolbarLayoutPolicy.phoneButtonWidth,
-        .play: PlaybackToolbarLayoutPolicy.phoneButtonWidth,
+        .play: PlaybackToolbarLayoutPolicy.nativeButtonWidth,
         .forward: PlaybackToolbarLayoutPolicy.phoneButtonWidth,
         .timeLabel: 180,
         .previous: PlaybackToolbarLayoutPolicy.phoneButtonWidth,
         .next: PlaybackToolbarLayoutPolicy.phoneButtonWidth,
         .volume: PlaybackToolbarLayoutPolicy.phoneButtonWidth,
-        .speed: PlaybackToolbarLayoutPolicy.phoneButtonWidth,
+        .speed: PlaybackToolbarLayoutPolicy.playbackRateButtonWidth,
         .aspectRatio: PlaybackToolbarLayoutPolicy.phoneButtonWidth,
         .episode: PlaybackToolbarLayoutPolicy.phoneButtonWidth,
-        .danmaku: 40,
-        .intro: 58,
-        .outro: 58,
-        .fullscreen: PlaybackToolbarLayoutPolicy.phoneButtonWidth
+        .danmaku: PlaybackToolbarLayoutPolicy.phoneDanmakuButtonWidth,
+        .intro: PlaybackToolbarLayoutPolicy.phoneMarkerButtonWidth,
+        .outro: PlaybackToolbarLayoutPolicy.phoneMarkerButtonWidth,
+        .fullscreen: PlaybackToolbarLayoutPolicy.nativeButtonWidth
     ]
 
     private static let padWidths: [PlaybackToolbarControl: Double] = [
         .rewind: PlaybackToolbarLayoutPolicy.padButtonWidth,
-        .play: PlaybackToolbarLayoutPolicy.padButtonWidth,
+        .play: PlaybackToolbarLayoutPolicy.nativeButtonWidth,
         .forward: PlaybackToolbarLayoutPolicy.padButtonWidth,
         .timeLabel: 180,
         .previous: PlaybackToolbarLayoutPolicy.padButtonWidth,
         .next: PlaybackToolbarLayoutPolicy.padButtonWidth,
         .volume: PlaybackToolbarLayoutPolicy.padButtonWidth,
-        .speed: PlaybackToolbarLayoutPolicy.padButtonWidth,
+        .speed: PlaybackToolbarLayoutPolicy.playbackRateButtonWidth,
         .aspectRatio: PlaybackToolbarLayoutPolicy.padButtonWidth,
         .episode: PlaybackToolbarLayoutPolicy.padButtonWidth,
-        .danmaku: 52,
-        .intro: 64,
-        .outro: 64,
-        .fullscreen: PlaybackToolbarLayoutPolicy.padButtonWidth
+        .danmaku: PlaybackToolbarLayoutPolicy.padDanmakuButtonWidth,
+        .intro: PlaybackToolbarLayoutPolicy.padMarkerButtonWidth,
+        .outro: PlaybackToolbarLayoutPolicy.padMarkerButtonWidth,
+        .fullscreen: PlaybackToolbarLayoutPolicy.nativeButtonWidth
     ]
 
     private static let landscapeControls: [PlaybackToolbarControl] = [
@@ -46,6 +46,19 @@ struct VerifyPlayerToolbarLayout {
     ]
 
     static func main() {
+        precondition(PlaybackToolbarLayoutPolicy.phoneButtonWidth == 28)
+        precondition(PlaybackToolbarLayoutPolicy.padButtonWidth == 34)
+        precondition(PlaybackToolbarLayoutPolicy.nativeButtonWidth == 30)
+        precondition(PlaybackToolbarLayoutPolicy.playbackRateButtonWidth == 28)
+        precondition(PlaybackToolbarLayoutPolicy.phoneSpacing == 5)
+        precondition(PlaybackToolbarLayoutPolicy.padSpacing == 10)
+        precondition(PlaybackToolbarLayoutPolicy.phonePlaybackRateSpacing == 10)
+        precondition(PlaybackToolbarLayoutPolicy.padPlaybackRateSpacing == 16)
+        precondition(PlaybackToolbarLayoutPolicy.phoneMarkerButtonWidth == 52)
+        precondition(PlaybackToolbarLayoutPolicy.padMarkerButtonWidth == 64)
+        precondition(PlaybackToolbarLayoutPolicy.verticalSeekStackWidth == 46)
+        precondition(PlaybackToolbarLayoutPolicy.verticalSeekButtonHeight == 42)
+
         var checks = 0
         let phoneLandscapeWidths = [812.0, 844, 852, 874, 896, 926]
         let padLandscapeWidths = [1024.0, 1080, 1112, 1180, 1194, 1366]
@@ -129,7 +142,12 @@ struct VerifyPlayerToolbarLayout {
                 widths: widths,
                 spacing: isPad
                     ? PlaybackToolbarLayoutPolicy.padSpacing
-                    : PlaybackToolbarLayoutPolicy.phoneSpacing
+                    : PlaybackToolbarLayoutPolicy.phoneSpacing,
+                customSpacingAfter: [
+                    .speed: isPad
+                        ? PlaybackToolbarLayoutPolicy.padPlaybackRateSpacing
+                        : PlaybackToolbarLayoutPolicy.phonePlaybackRateSpacing
+                ]
             )
             precondition(decision.occupiedWidth <= availableWidth + 0.001)
             return
@@ -151,6 +169,9 @@ struct VerifyPlayerToolbarLayout {
         let spacing = isPad
             ? PlaybackToolbarLayoutPolicy.padSpacing
             : PlaybackToolbarLayoutPolicy.phoneSpacing
+        let playbackRateSpacing = isPad
+            ? PlaybackToolbarLayoutPolicy.padPlaybackRateSpacing
+            : PlaybackToolbarLayoutPolicy.phonePlaybackRateSpacing
         var controls = landscapeControls
         if !canSelectEpisode {
             controls.removeAll { $0 == .episode }
@@ -161,7 +182,8 @@ struct VerifyPlayerToolbarLayout {
             availableWidth: availableWidth,
             controls: controls,
             widths: widths,
-            spacing: spacing
+            spacing: spacing,
+            customSpacingAfter: [.speed: playbackRateSpacing]
         )
 
         precondition(controls.contains(.rewind))
@@ -177,7 +199,8 @@ struct VerifyPlayerToolbarLayout {
         precondition(controls.contains(.outro))
         precondition(controls.contains(.fullscreen))
         precondition(controls.contains(.episode) == canSelectEpisode)
-        precondition(spacing >= (isPad ? 12 : 10))
+        precondition(spacing == (isPad ? 10 : 5))
+        precondition(playbackRateSpacing == (isPad ? 16 : 10))
         precondition(decision.timeLabelWidth >= PlaybackToolbarLayoutPolicy.minimumTimeLabelWidth)
         precondition(decision.occupiedWidth <= availableWidth + 0.001)
     }

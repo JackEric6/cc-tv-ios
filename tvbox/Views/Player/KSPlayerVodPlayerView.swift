@@ -2476,11 +2476,6 @@ private struct KSPlayerUIView: UIViewRepresentable {
             configureMarkerButton(outroButton, title: outroLabel, label: "标记片尾", action: #selector(markOutroPressed), resetAction: #selector(resetOutroPressed))
 
             let padLayout = UIDevice.current.userInterfaceIdiom == .pad
-            let buttonWidth = CGFloat(
-                padLayout
-                    ? PlaybackToolbarLayoutPolicy.padButtonWidth
-                    : PlaybackToolbarLayoutPolicy.phoneButtonWidth
-            )
             verticalSeekStack.axis = .vertical
             verticalSeekStack.alignment = .center
             verticalSeekStack.distribution = .fillEqually
@@ -2494,9 +2489,15 @@ private struct KSPlayerUIView: UIViewRepresentable {
                 verticalSeekConstraints = [
                     verticalSeekStack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -14),
                     verticalSeekStack.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-                    verticalSeekStack.widthAnchor.constraint(equalToConstant: buttonWidth + 4),
-                    verticalRewindButton.heightAnchor.constraint(equalToConstant: buttonWidth),
-                    verticalForwardButton.heightAnchor.constraint(equalToConstant: buttonWidth)
+                    verticalSeekStack.widthAnchor.constraint(
+                        equalToConstant: CGFloat(PlaybackToolbarLayoutPolicy.verticalSeekStackWidth)
+                    ),
+                    verticalRewindButton.heightAnchor.constraint(
+                        equalToConstant: CGFloat(PlaybackToolbarLayoutPolicy.verticalSeekButtonHeight)
+                    ),
+                    verticalForwardButton.heightAnchor.constraint(
+                        equalToConstant: CGFloat(PlaybackToolbarLayoutPolicy.verticalSeekButtonHeight)
+                    )
                 ]
                 NSLayoutConstraint.activate(verticalSeekConstraints)
             }
@@ -2546,14 +2547,31 @@ private struct KSPlayerUIView: UIViewRepresentable {
                     ? PlaybackToolbarLayoutPolicy.padSpacing
                     : PlaybackToolbarLayoutPolicy.phoneSpacing
             )
+            let playbackRateSpacing = CGFloat(
+                padLayout
+                    ? PlaybackToolbarLayoutPolicy.padPlaybackRateSpacing
+                    : PlaybackToolbarLayoutPolicy.phonePlaybackRateSpacing
+            )
             toolbar.spacing = toolbarSpacing
-            toolbar.setCustomSpacing(toolbarSpacing, after: toolbar.playbackRateButton)
+            toolbar.setCustomSpacing(playbackRateSpacing, after: toolbar.playbackRateButton)
             toolbar.timeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             toolbar.timeLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
             toolbar.timeLabel.lineBreakMode = .byClipping
-            ensureWidthConstraint(toolbar.playButton, constant: buttonWidth, relation: .equal)
-            ensureWidthConstraint(toolbar.playbackRateButton, constant: buttonWidth, relation: .equal)
-            ensureWidthConstraint(view.landscapeButton, constant: buttonWidth, relation: .equal)
+            ensureWidthConstraint(
+                toolbar.playButton,
+                constant: CGFloat(PlaybackToolbarLayoutPolicy.nativeButtonWidth),
+                relation: .equal
+            )
+            ensureWidthConstraint(
+                toolbar.playbackRateButton,
+                constant: CGFloat(PlaybackToolbarLayoutPolicy.playbackRateButtonWidth),
+                relation: .equal
+            )
+            ensureWidthConstraint(
+                view.landscapeButton,
+                constant: CGFloat(PlaybackToolbarLayoutPolicy.nativeButtonWidth),
+                relation: .equal
+            )
             for arranged in orderedViews where arranged !== toolbar.timeLabel {
                 arranged.setContentCompressionResistancePriority(.required, for: .horizontal)
                 arranged.setContentHuggingPriority(.required, for: .horizontal)
@@ -2623,11 +2641,16 @@ private struct KSPlayerUIView: UIViewRepresentable {
                     ? PlaybackToolbarLayoutPolicy.padSpacing
                     : PlaybackToolbarLayoutPolicy.phoneSpacing
             )
+            let playbackRateSpacing = CGFloat(
+                isPad
+                    ? PlaybackToolbarLayoutPolicy.padPlaybackRateSpacing
+                    : PlaybackToolbarLayoutPolicy.phonePlaybackRateSpacing
+            )
             if abs(toolbar.spacing - spacing) > 0.1 {
                 toolbar.spacing = spacing
             }
-            if abs(toolbar.customSpacing(after: toolbar.playbackRateButton) - spacing) > 0.1 {
-                toolbar.setCustomSpacing(spacing, after: toolbar.playbackRateButton)
+            if abs(toolbar.customSpacing(after: toolbar.playbackRateButton) - playbackRateSpacing) > 0.1 {
+                toolbar.setCustomSpacing(playbackRateSpacing, after: toolbar.playbackRateButton)
             }
 
             let visibleControls = desiredToolbarControls(for: playerView)
@@ -2638,7 +2661,10 @@ private struct KSPlayerUIView: UIViewRepresentable {
                 availableWidth: availableWidth,
                 controls: visibleControls,
                 widths: widths,
-                spacing: Double(spacing)
+                spacing: Double(spacing),
+                customSpacingAfter: [
+                    .speed: Double(playbackRateSpacing)
+                ]
             )
             updateFittedTimeLabelWidth(
                 decision.timeLabelWidth,
@@ -2817,10 +2843,12 @@ private struct KSPlayerUIView: UIViewRepresentable {
             button.translatesAutoresizingMaskIntoConstraints = false
             let minimumTargetWidth = CGFloat(
                 UIDevice.current.userInterfaceIdiom == .pad
-                    ? PlaybackToolbarLayoutPolicy.padButtonWidth
-                    : PlaybackToolbarLayoutPolicy.phoneButtonWidth
+                    ? PlaybackToolbarLayoutPolicy.padDanmakuButtonWidth
+                    : PlaybackToolbarLayoutPolicy.phoneDanmakuButtonWidth
             )
-            let resolvedWidth = max(width, minimumTargetWidth)
+            let resolvedWidth = UIDevice.current.userInterfaceIdiom == .pad
+                ? max(width, minimumTargetWidth)
+                : min(width, minimumTargetWidth)
             ensureWidthConstraint(button, constant: resolvedWidth, relation: .equal)
             button.backgroundColor = .clear
             button.layer.backgroundColor = UIColor.clear.cgColor
@@ -2846,7 +2874,11 @@ private struct KSPlayerUIView: UIViewRepresentable {
             button.translatesAutoresizingMaskIntoConstraints = false
             ensureWidthConstraint(
                 button,
-                constant: UIDevice.current.userInterfaceIdiom == .pad ? 64 : 58,
+                constant: CGFloat(
+                    UIDevice.current.userInterfaceIdiom == .pad
+                        ? PlaybackToolbarLayoutPolicy.padMarkerButtonWidth
+                        : PlaybackToolbarLayoutPolicy.phoneMarkerButtonWidth
+                ),
                 relation: .equal
             )
             button.backgroundColor = .clear

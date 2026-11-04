@@ -4,6 +4,7 @@ Actions 运行本身保存在 GitHub；此文件将重要构建与源码提交�
 
 | 时间（UTC） | 分支 | 源码提交 | 结果 | Actions 运行 |
 | --- | --- | --- | --- | --- |
+| 2026-11-04 | `main` | 待提交 | 待构建；恢复 1.0.6 播放器按钮宽度与间距，版本 `1.0.7 (11)` | 待完成 |
 | 2026-11-04 14:43 | `main` | `40e238b` | 成功；版本 `1.0.7 (10)`，全控件横屏布局回归、Release 编译、元数据校验及 IPA 打包通过；本地保留未签名 IPA | [41848448122](https://github.com/JackEric6/cc-tv-ios/actions/runs/41848448122) |
 | 2026-11-04 13:09 | `main` | `589331f` | 成功；版本 `1.0.6 (9)`，片尾标记改为按本集剩余时间切集；已更新 GitHub Release，附件为 `CongcongTV-unsigned-1.0.6.ipa` | [41835603498](https://github.com/JackEric6/cc-tv-ios/actions/runs/41835603498) · [Release 1.0.6](https://github.com/JackEric6/cc-tv-ios/releases/tag/1.0.6) |
 | 2026-11-04 12:10 | `main` | `1641a9a` | 成功；版本 `1.0.6 (8)`，回归校验、Release 编译、元数据核验及 IPA 打包完成；已发布 GitHub Release 并附 IPA | [41826947704](https://github.com/JackEric6/cc-tv-ios/actions/runs/41826947704) · [Release 1.0.6](https://github.com/JackEric6/cc-tv-ios/releases/tag/1.0.6) |
@@ -18,7 +19,7 @@ Actions 运行本身保存在 GitHub；此文件将重要构建与源码提交�
 ## 版本标记
 
 - `MARKETING_VERSION`: `1.0.7`
-- `CURRENT_PROJECT_VERSION`: `10`
+- `CURRENT_PROJECT_VERSION`: `11`
 - 版本字段定义在 `project.yml`；日常迭代由 Git commit 和 Actions run 追踪。发布到需要唯一构建号的平台前，应先提升构建号。
 
 ## 构建产物

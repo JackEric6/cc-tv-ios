@@ -370,7 +370,7 @@ jobs:
           import json
           sources = json.loads(source_config.read_text(encoding="utf-8"))["sites"]
           project_spec = Path("project.yml").read_text(encoding="utf-8")
-          assert 'CURRENT_PROJECT_VERSION: "10"' in project_spec
+          assert 'CURRENT_PROJECT_VERSION: "11"' in project_spec
           assert 'MARKETING_VERSION: "1.0.7"' in project_spec
           assert len(sources) == 47
           assert len({item["key"] for item in sources}) == 47
@@ -398,7 +398,7 @@ jobs:
           assert info["CFBundlePackageType"] == "APPL"
           assert info["CFBundleDisplayName"] == "CongcongTV"
           assert info["CFBundleShortVersionString"] == "1.0.7"
-          assert info["CFBundleVersion"] == "10"
+          assert info["CFBundleVersion"] == "11"
           assert info["MinimumOSVersion"] == "17.0"
           assert (app / info["CFBundleExecutable"]).is_file()
           assert (app / "xgzy_config_all.json").is_file()
