@@ -1880,6 +1880,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             self.onDanmakuEnabledChanged = onDanmakuEnabledChanged
             danmakuSettings.enabled = danmakuEnabled
             danmakuSettings.save()
+            super.init()
             appWillResignActiveObserver = NotificationCenter.default.addObserver(
                 forName: UIApplication.willResignActiveNotification,
                 object: nil,
