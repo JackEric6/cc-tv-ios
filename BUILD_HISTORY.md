@@ -4,6 +4,7 @@ Actions 运行本身保存在 GitHub；此文件将重要构建与源码提交�
 
 | 时间（UTC） | 分支 | 源码提交 | 结果 | Actions 运行 |
 | --- | --- | --- | --- | --- |
+| 2026-11-04 14:43 | `main` | `40e238b` | 成功；版本 `1.0.7 (10)`，全控件横屏布局回归、Release 编译、元数据校验及 IPA 打包通过；本地保留未签名 IPA | [41848448122](https://github.com/JackEric6/cc-tv-ios/actions/runs/41848448122) |
 | 2026-11-04 13:09 | `main` | `589331f` | 成功；版本 `1.0.6 (9)`，片尾标记改为按本集剩余时间切集；已更新 GitHub Release，附件为 `CongcongTV-unsigned-1.0.6.ipa` | [41835603498](https://github.com/JackEric6/cc-tv-ios/actions/runs/41835603498) · [Release 1.0.6](https://github.com/JackEric6/cc-tv-ios/releases/tag/1.0.6) |
 | 2026-11-04 12:10 | `main` | `1641a9a` | 成功；版本 `1.0.6 (8)`，回归校验、Release 编译、元数据核验及 IPA 打包完成；已发布 GitHub Release 并附 IPA | [41826947704](https://github.com/JackEric6/cc-tv-ios/actions/runs/41826947704) · [Release 1.0.6](https://github.com/JackEric6/cc-tv-ios/releases/tag/1.0.6) |
 | 2026-10-24 18:12 | `codex/ios-1.0.5-m3u8` | `69da535` | Release 编译和 IPA 打包成功；Actions Artifact 上传受仓库存储配额限制，后续已将本地构建 IPA 附加到 GitHub Release | [40119665580](https://github.com/JackEric6/cc-tv-ios/actions/runs/40119665580) · [Release 1.0.5](https://github.com/JackEric6/cc-tv-ios/releases/tag/1.0.5) |
