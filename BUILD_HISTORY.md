@@ -16,10 +16,10 @@ Actions 运行本身保存在 GitHub；此文件将重要构建与源码提交�
 
 ## 版本标记
 
-- `MARKETING_VERSION`: `1.0.6`
-- `CURRENT_PROJECT_VERSION`: `9`
+- `MARKETING_VERSION`: `1.0.7`
+- `CURRENT_PROJECT_VERSION`: `10`
 - 版本字段定义在 `project.yml`；日常迭代由 Git commit 和 Actions run 追踪。发布到需要唯一构建号的平台前，应先提升构建号。
 
 ## 构建产物
 
-工作流 `Build CongcongTV iOS IPA (XGZY)` 上传的 IPA 文件名包含版本号，例如 `CongcongTV-unsigned-1.0.6.ipa`，并附带 `build.log`。在对应 Actions 运行页面下载；artifact 按 GitHub 的保留期限保存，过期后可重新运行 workflow 构建。
+工作流 `Build CongcongTV iOS IPA (XGZY)` 上传的 IPA 文件名包含版本号，例如 `CongcongTV-unsigned-1.0.7.ipa`，并附带 `build.log`。在对应 Actions 运行页面下载；artifact 按 GitHub 的保留期限保存，过期后可重新运行 workflow 构建。

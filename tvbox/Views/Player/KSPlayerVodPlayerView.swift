@@ -182,6 +182,7 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
     private var deviceStatusTimer: Timer?
     private var playbackSessionObserver: NSObjectProtocol?
     var customControlsLayout: ((Bool) -> Void)?
+    var customControlsFitLayout: (() -> Void)?
     var customControlsRefresh: (() -> Void)?
     private var isSliderDragging = false
     private var sliderSeekCommitted = false
@@ -369,6 +370,7 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
     override func layoutSubviews() {
         super.layoutSubviews()
         applyDisplayAspectRatio(selectedAspectRatio, isFullscreenLandscape: isAspectRatioFullscreen)
+        customControlsFitLayout?()
     }
 
     fileprivate func applyDisplayAspectRatio(
@@ -1665,6 +1667,9 @@ private struct KSPlayerUIView: UIViewRepresentable {
     private func configure(_ view: CongcongKSVideoPlayerView, coordinator: Coordinator) {
         coordinator.url = url
         coordinator.playbackSessionToken = playbackSessionToken
+        view.customControlsFitLayout = { [weak coordinator] in
+            coordinator?.refreshToolbarLayout()
+        }
         let needsPlaybackReplacement = view.playerLayer == nil
             || view.configuredPlaybackURL != url
             || view.configuredPlaybackHeaders != playbackHeaders
@@ -1816,8 +1821,12 @@ private struct KSPlayerUIView: UIViewRepresentable {
         private let episodeButton = UIButton(type: .system)
         private let aspectRatioButton = UIButton(type: .system)
         private let danmakuButton = UIButton(type: .system)
+        private let moreButton = UIButton(type: .system)
         private let introButton = UIButton(type: .system)
         private let outroButton = UIButton(type: .system)
+        private var overflowedToolbarControls = Set<PlaybackToolbarControl>()
+        private var fittedTimeLabelWidthConstraint: NSLayoutConstraint?
+        private var moreMenuSignature: String?
         private var introLabel = "片头"
         private var outroLabel = "片尾"
         /// Strongly retain the native view across SwiftUI's transient
@@ -2466,9 +2475,16 @@ private struct KSPlayerUIView: UIViewRepresentable {
             aspectRatioButton.menu = makeAspectRatioMenu()
             aspectRatioButton.showsMenuAsPrimaryAction = true
             configureTextButton(danmakuButton, title: "弹幕", width: 40, label: "弹幕设置", action: #selector(danmakuPressed))
+            configureOverflowButton(moreButton)
             configureMarkerButton(introButton, title: introLabel, label: "标记片头", action: #selector(markIntroPressed), resetAction: #selector(resetIntroPressed))
             configureMarkerButton(outroButton, title: outroLabel, label: "标记片尾", action: #selector(markOutroPressed), resetAction: #selector(resetOutroPressed))
 
+            let padLayout = UIDevice.current.userInterfaceIdiom == .pad
+            let buttonWidth = CGFloat(
+                padLayout
+                    ? PlaybackToolbarLayoutPolicy.padButtonWidth
+                    : PlaybackToolbarLayoutPolicy.phoneButtonWidth
+            )
             verticalSeekStack.axis = .vertical
             verticalSeekStack.alignment = .center
             verticalSeekStack.distribution = .fillEqually
@@ -2482,9 +2498,9 @@ private struct KSPlayerUIView: UIViewRepresentable {
                 verticalSeekConstraints = [
                     verticalSeekStack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -14),
                     verticalSeekStack.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-                    verticalSeekStack.widthAnchor.constraint(equalToConstant: 46),
-                    verticalRewindButton.heightAnchor.constraint(equalToConstant: 42),
-                    verticalForwardButton.heightAnchor.constraint(equalToConstant: 42)
+                    verticalSeekStack.widthAnchor.constraint(equalToConstant: buttonWidth + 4),
+                    verticalRewindButton.heightAnchor.constraint(equalToConstant: buttonWidth),
+                    verticalForwardButton.heightAnchor.constraint(equalToConstant: buttonWidth)
                 ]
                 NSLayoutConstraint.activate(verticalSeekConstraints)
             }
@@ -2507,6 +2523,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
                 danmakuButton,
                 introButton,
                 outroButton,
+                moreButton,
                 view.landscapeButton
             ]
             let currentToolbarViews = toolbar.arrangedSubviews
@@ -2525,21 +2542,28 @@ private struct KSPlayerUIView: UIViewRepresentable {
                     toolbar.addArrangedSubview(arranged)
                 }
             }
-            // Keep small gaps between controls while leaving the time label as
-            // the only flexible item in the narrow inline toolbar.
+            // Keep a clear gap between controls; the time label is the only
+            // flexible item and secondary actions move into the overflow menu.
             toolbar.axis = .horizontal
             toolbar.alignment = .center
             toolbar.distribution = .fill
-            let padLayout = UIDevice.current.userInterfaceIdiom == .pad
-            toolbar.spacing = padLayout ? 10 : 5
-            toolbar.setCustomSpacing(padLayout ? 16 : 10, after: toolbar.playbackRateButton)
+            let toolbarSpacing = CGFloat(
+                padLayout
+                    ? PlaybackToolbarLayoutPolicy.padSpacing
+                    : PlaybackToolbarLayoutPolicy.phoneSpacing
+            )
+            toolbar.spacing = toolbarSpacing
+            toolbar.setCustomSpacing(toolbarSpacing, after: toolbar.playbackRateButton)
             toolbar.timeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             toolbar.timeLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            ensureWidthConstraint(toolbar.playbackRateButton, constant: 28, relation: .equal)
-            toolbar.playbackRateButton.setContentCompressionResistancePriority(.required, for: .horizontal)
-            episodeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
-            aspectRatioButton.setContentCompressionResistancePriority(.required, for: .horizontal)
-            danmakuButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+            toolbar.timeLabel.lineBreakMode = .byClipping
+            ensureWidthConstraint(toolbar.playButton, constant: buttonWidth, relation: .equal)
+            ensureWidthConstraint(toolbar.playbackRateButton, constant: buttonWidth, relation: .equal)
+            ensureWidthConstraint(view.landscapeButton, constant: buttonWidth, relation: .equal)
+            for arranged in orderedViews where arranged !== toolbar.timeLabel {
+                arranged.setContentCompressionResistancePriority(.required, for: .horizontal)
+                arranged.setContentHuggingPriority(.required, for: .horizontal)
+            }
             toolbar.playButton.isEnabled = !isResolvingPlayback
             updateActionButtons(
                 canPlayPrevious: canPlayPrevious,
@@ -2575,12 +2599,9 @@ private struct KSPlayerUIView: UIViewRepresentable {
             nextButton.alpha = canPlayNext ? 1 : 0.45
             episodeButton.isHidden = !isLandscape || !canSelectEpisode
             aspectRatioButton.isHidden = !isLandscape
-            introButton.isHidden = false
-            outroButton.isHidden = false
             rewindButton.isHidden = !isLandscape
             forwardButton.isHidden = !isLandscape
             verticalSeekStack.isHidden = isLandscape
-            volumeButton.isHidden = false
             danmakuButton.isHidden = !isLandscape
             updateDanmakuButton()
             aspectRatioButton.menu = makeAspectRatioMenu()
@@ -2591,7 +2612,248 @@ private struct KSPlayerUIView: UIViewRepresentable {
             if let playerView {
                 updateDanmakuLayout(in: playerView)
             }
+            refreshToolbarLayout()
             applyControlVisibility()
+        }
+
+        func refreshToolbarLayout() {
+            guard let playerView else { return }
+            let toolbar = playerView.toolBar
+            let availableWidth = Double(toolbar.bounds.width)
+            guard availableWidth.isFinite, availableWidth > 0 else { return }
+
+            let isPad = UIDevice.current.userInterfaceIdiom == .pad
+            let spacing = CGFloat(
+                isPad
+                    ? PlaybackToolbarLayoutPolicy.padSpacing
+                    : PlaybackToolbarLayoutPolicy.phoneSpacing
+            )
+            if abs(toolbar.spacing - spacing) > 0.1 {
+                toolbar.spacing = spacing
+            }
+            if abs(toolbar.customSpacing(after: toolbar.playbackRateButton) - spacing) > 0.1 {
+                toolbar.setCustomSpacing(spacing, after: toolbar.playbackRateButton)
+            }
+
+            let visibleControls = desiredToolbarControls(for: playerView)
+            var widths = Dictionary(uniqueKeysWithValues: visibleControls.map { control in
+                (control, toolbarWidth(for: control, in: playerView))
+            })
+            widths[.more] = toolbarWidth(for: .more, in: playerView)
+            let decision = PlaybackToolbarLayoutPolicy.layout(
+                availableWidth: availableWidth,
+                controls: visibleControls,
+                widths: widths,
+                spacing: Double(spacing),
+                minimumTimeLabelWidth: PlaybackToolbarLayoutPolicy.minimumTimeLabelWidth
+            )
+            overflowedToolbarControls = decision.hiddenControls
+            updateFittedTimeLabelWidth(
+                decision.timeLabelWidth,
+                intrinsicWidth: toolbar.timeLabel.intrinsicContentSize.width
+            )
+            applyToolbarButtonVisibility()
+            updateMoreMenu(for: decision.hiddenControls)
+        }
+
+        private func desiredToolbarControls(
+            for playerView: IOSVideoPlayerView
+        ) -> [PlaybackToolbarControl] {
+            var controls: [PlaybackToolbarControl] = []
+            if isLandscape { controls.append(.rewind) }
+            controls.append(.play)
+            if isLandscape { controls.append(.forward) }
+            controls.append(.timeLabel)
+            if isLandscape {
+                controls.append(contentsOf: [.previous, .next])
+            }
+            controls.append(contentsOf: [.volume, .speed])
+            if isLandscape {
+                controls.append(.aspectRatio)
+                if canSelectEpisode { controls.append(.episode) }
+                controls.append(.danmaku)
+            }
+            controls.append(contentsOf: [.intro, .outro])
+            controls.append(.fullscreen)
+            return controls
+        }
+
+        private func toolbarWidth(
+            for control: PlaybackToolbarControl,
+            in playerView: IOSVideoPlayerView
+        ) -> Double {
+            switch control {
+            case .rewind: return fixedWidth(of: rewindButton)
+            case .play: return fixedWidth(of: playerView.toolBar.playButton)
+            case .forward: return fixedWidth(of: forwardButton)
+            case .timeLabel: return Double(playerView.toolBar.timeLabel.intrinsicContentSize.width)
+            case .previous: return fixedWidth(of: previousButton)
+            case .next: return fixedWidth(of: nextButton)
+            case .volume: return fixedWidth(of: volumeButton)
+            case .speed: return fixedWidth(of: playerView.toolBar.playbackRateButton)
+            case .aspectRatio: return fixedWidth(of: aspectRatioButton)
+            case .episode: return fixedWidth(of: episodeButton)
+            case .danmaku: return fixedWidth(of: danmakuButton)
+            case .intro: return fixedWidth(of: introButton)
+            case .outro: return fixedWidth(of: outroButton)
+            case .more: return fixedWidth(of: moreButton)
+            case .fullscreen: return fixedWidth(of: playerView.landscapeButton)
+            }
+        }
+
+        private func fixedWidth(of view: UIView) -> Double {
+            let constraintWidth = equalWidthConstraint(for: view)?.constant ?? 0
+            let measuredWidth = max(constraintWidth, view.intrinsicContentSize.width)
+            return Double(max(0, measuredWidth))
+        }
+
+        private func updateFittedTimeLabelWidth(_ width: Double, intrinsicWidth: CGFloat) {
+            guard let timeLabel = playerView?.toolBar.timeLabel else { return }
+            let targetWidth = CGFloat(width)
+            let needsFixedWidth = targetWidth + 0.5 < intrinsicWidth
+            if needsFixedWidth {
+                if let fittedTimeLabelWidthConstraint {
+                    if abs(fittedTimeLabelWidthConstraint.constant - targetWidth) > 0.5 {
+                        fittedTimeLabelWidthConstraint.constant = targetWidth
+                    }
+                } else {
+                    let constraint = timeLabel.widthAnchor.constraint(equalToConstant: targetWidth)
+                    constraint.priority = .required
+                    constraint.isActive = true
+                    fittedTimeLabelWidthConstraint = constraint
+                }
+            } else if let fittedTimeLabelWidthConstraint {
+                fittedTimeLabelWidthConstraint.isActive = false
+                self.fittedTimeLabelWidthConstraint = nil
+            }
+        }
+
+        private func applyToolbarButtonVisibility() {
+            let overflow = overflowedToolbarControls
+            rewindButton.isHidden = !controlsVisible || !isLandscape || overflow.contains(.rewind)
+            forwardButton.isHidden = !controlsVisible || !isLandscape || overflow.contains(.forward)
+            previousButton.isHidden = !controlsVisible || !isLandscape || overflow.contains(.previous)
+            nextButton.isHidden = !controlsVisible || !isLandscape || overflow.contains(.next)
+            volumeButton.isHidden = !controlsVisible || overflow.contains(.volume)
+            playerView?.toolBar.playbackRateButton.isHidden =
+                !controlsVisible || overflow.contains(.speed)
+            aspectRatioButton.isHidden =
+                !controlsVisible || !isLandscape || overflow.contains(.aspectRatio)
+            episodeButton.isHidden =
+                !controlsVisible || !isLandscape || !canSelectEpisode || overflow.contains(.episode)
+            danmakuButton.isHidden =
+                !controlsVisible || !isLandscape || overflow.contains(.danmaku)
+            introButton.isHidden = !controlsVisible || overflow.contains(.intro)
+            outroButton.isHidden = !controlsVisible || overflow.contains(.outro)
+            playerView?.landscapeButton.isHidden =
+                !controlsVisible || overflow.contains(.fullscreen)
+            moreButton.isHidden = !controlsVisible || overflow.isEmpty
+        }
+
+        private func updateMoreMenu(for hiddenControls: Set<PlaybackToolbarControl>) {
+            let signature = [
+                hiddenControls.map(\.rawValue).sorted().joined(separator: ","),
+                canPlayPrevious ? "p1" : "p0",
+                canPlayNext ? "n1" : "n0",
+                introLabel,
+                outroLabel,
+                selectedAspectRatio.rawValue,
+                String(format: "%.2f", playerView?.playerLayer?.player.playbackRate ?? 1)
+            ].joined(separator: "|")
+            guard signature != moreMenuSignature else { return }
+            moreMenuSignature = signature
+            guard !hiddenControls.isEmpty else {
+                moreButton.menu = nil
+                return
+            }
+
+            var items: [UIMenuElement] = []
+            if hiddenControls.contains(.rewind) {
+                items.append(toolbarMenuAction("后退 15 秒", image: "gobackward.15") { [weak self] in
+                    self?.rewindPressed()
+                })
+            }
+            if hiddenControls.contains(.forward) {
+                items.append(toolbarMenuAction("前进 15 秒", image: "goforward.15") { [weak self] in
+                    self?.forwardPressed()
+                })
+            }
+            if hiddenControls.contains(.previous) {
+                items.append(toolbarMenuAction(
+                    "上一集",
+                    image: "backward.end",
+                    enabled: canPlayPrevious
+                ) { [weak self] in
+                    self?.previousPressed()
+                })
+            }
+            if hiddenControls.contains(.next) {
+                items.append(toolbarMenuAction(
+                    "下一集",
+                    image: "forward.end",
+                    enabled: canPlayNext
+                ) { [weak self] in
+                    self?.nextPressed()
+                })
+            }
+            if hiddenControls.contains(.volume) {
+                items.append(toolbarMenuAction("音量", image: "speaker.wave.2") { [weak self] in
+                    self?.volumePressed()
+                })
+            }
+            if hiddenControls.contains(.speed),
+               let speedMenu = playerView?.toolBar.playbackRateButton.menu {
+                items.append(UIMenu(
+                    title: "倍速",
+                    image: UIImage(systemName: "speedometer"),
+                    children: speedMenu.children
+                ))
+            }
+            if hiddenControls.contains(.aspectRatio) {
+                items.append(makeAspectRatioMenu())
+            }
+            if hiddenControls.contains(.episode) {
+                items.append(toolbarMenuAction("选集", image: "list.bullet") { [weak self] in
+                    self?.selectEpisodePressed()
+                })
+            }
+            if hiddenControls.contains(.danmaku) {
+                items.append(toolbarMenuAction("弹幕", image: "captions.bubble") { [weak self] in
+                    self?.danmakuPressed()
+                })
+            }
+            if hiddenControls.contains(.intro) {
+                items.append(UIMenu(title: "片头", image: UIImage(systemName: "forward.end.alt"), children: [
+                    toolbarMenuAction("标记片头") { [weak self] in self?.onMarkIntro?() },
+                    toolbarMenuAction("清除片头", enabled: introLabel != "片头") { [weak self] in
+                        self?.onResetIntro?()
+                    }
+                ]))
+            }
+            if hiddenControls.contains(.outro) {
+                items.append(UIMenu(title: "片尾", image: UIImage(systemName: "backward.end.alt"), children: [
+                    toolbarMenuAction("标记片尾") { [weak self] in self?.onMarkOutro?() },
+                    toolbarMenuAction("清除片尾", enabled: outroLabel != "片尾") { [weak self] in
+                        self?.onResetOutro?()
+                    }
+                ]))
+            }
+            moreButton.menu = UIMenu(title: "更多控制", children: items)
+        }
+
+        private func toolbarMenuAction(
+            _ title: String,
+            image: String? = nil,
+            enabled: Bool = true,
+            action: @escaping () -> Void
+        ) -> UIAction {
+            UIAction(
+                title: title,
+                image: image.flatMap { UIImage(systemName: $0) },
+                attributes: enabled ? [] : [.disabled]
+            ) { _ in
+                action()
+            }
         }
 
         func updateControlVisibility(isVisible: Bool) {
@@ -2612,6 +2874,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
 
         private func applyControlVisibility() {
             let alpha: CGFloat = controlsVisible ? 1 : 0
+            applyToolbarButtonVisibility()
             UIView.animate(withDuration: 0.2) {
                 self.verticalSeekStack.alpha = self.controlsVisible && !self.isLandscape ? 1 : 0
                 self.playerView?.routeButton.alpha = alpha
@@ -2622,15 +2885,11 @@ private struct KSPlayerUIView: UIViewRepresentable {
                     && !self.isResolvingPlayback
                     && canShowPlaybackControl ? 1 : 0
                 self.playerView?.toolBar.playbackRateButton.alpha = alpha
-                self.playerView?.toolBar.playbackRateButton.isHidden = !self.controlsVisible
                 self.introButton.alpha = alpha
                 self.outroButton.alpha = alpha
                 self.danmakuButton.alpha = alpha
                 self.aspectRatioButton.alpha = alpha
-                self.introButton.isHidden = !self.controlsVisible
-                self.outroButton.isHidden = !self.controlsVisible
-                self.danmakuButton.isHidden = !self.controlsVisible || !self.isLandscape
-                self.aspectRatioButton.isHidden = !self.controlsVisible || !self.isLandscape
+                self.moreButton.alpha = alpha
             }
         }
 
@@ -2646,9 +2905,14 @@ private struct KSPlayerUIView: UIViewRepresentable {
             button.tintColor = .white
             button.accessibilityLabel = label
             button.translatesAutoresizingMaskIntoConstraints = false
+            let isPad = UIDevice.current.userInterfaceIdiom == .pad
             ensureWidthConstraint(
                 button,
-                constant: UIDevice.current.userInterfaceIdiom == .pad ? 34 : 28,
+                constant: CGFloat(
+                    isPad
+                        ? PlaybackToolbarLayoutPolicy.padButtonWidth
+                        : PlaybackToolbarLayoutPolicy.phoneButtonWidth
+                ),
                 relation: .equal
             )
             button.backgroundColor = .clear
@@ -2676,9 +2940,12 @@ private struct KSPlayerUIView: UIViewRepresentable {
             button.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
             button.accessibilityLabel = label
             button.translatesAutoresizingMaskIntoConstraints = false
-            let resolvedWidth = UIDevice.current.userInterfaceIdiom == .pad
-                ? max(width, 52)
-                : min(width, 40)
+            let minimumTargetWidth = CGFloat(
+                UIDevice.current.userInterfaceIdiom == .pad
+                    ? PlaybackToolbarLayoutPolicy.padButtonWidth
+                    : PlaybackToolbarLayoutPolicy.phoneButtonWidth
+            )
+            let resolvedWidth = max(width, minimumTargetWidth)
             ensureWidthConstraint(button, constant: resolvedWidth, relation: .equal)
             button.backgroundColor = .clear
             button.layer.backgroundColor = UIColor.clear.cgColor
@@ -2690,6 +2957,28 @@ private struct KSPlayerUIView: UIViewRepresentable {
             button.clipsToBounds = false
             button.removeTarget(self, action: action, for: .primaryActionTriggered)
             button.addTarget(self, action: action, for: .primaryActionTriggered)
+        }
+
+        private func configureOverflowButton(_ button: UIButton) {
+            let symbolConfiguration = UIImage.SymbolConfiguration(pointSize: 16, weight: .regular)
+            button.setImage(UIImage(systemName: "ellipsis.circle", withConfiguration: symbolConfiguration), for: .normal)
+            button.tintColor = .white
+            button.accessibilityLabel = "更多控制"
+            button.translatesAutoresizingMaskIntoConstraints = false
+            let isPad = UIDevice.current.userInterfaceIdiom == .pad
+            ensureWidthConstraint(
+                button,
+                constant: CGFloat(
+                    isPad
+                        ? PlaybackToolbarLayoutPolicy.padButtonWidth
+                        : PlaybackToolbarLayoutPolicy.phoneButtonWidth
+                ),
+                relation: .equal
+            )
+            button.backgroundColor = .clear
+            button.clipsToBounds = false
+            button.showsMenuAsPrimaryAction = true
+            button.isHidden = true
         }
 
         private func configureMarkerButton(_ button: UIButton, title: String, label: String, action: Selector, resetAction: Selector) {
@@ -2704,7 +2993,7 @@ private struct KSPlayerUIView: UIViewRepresentable {
             button.translatesAutoresizingMaskIntoConstraints = false
             ensureWidthConstraint(
                 button,
-                constant: UIDevice.current.userInterfaceIdiom == .pad ? 64 : 52,
+                constant: UIDevice.current.userInterfaceIdiom == .pad ? 64 : 58,
                 relation: .equal
             )
             button.backgroundColor = .clear
@@ -2725,22 +3014,45 @@ private struct KSPlayerUIView: UIViewRepresentable {
             button.addGestureRecognizer(longPress)
         }
 
+        private func equalWidthConstraint(for view: UIView) -> NSLayoutConstraint? {
+            var currentView: UIView? = view
+            while let ancestor = currentView {
+                if let constraint = ancestor.constraints.first(where: {
+                    ($0.firstItem as? UIView) === view
+                        && $0.firstAttribute == .width
+                        && $0.relation == .equal
+                        && $0.secondItem == nil
+                }) {
+                    return constraint
+                }
+                currentView = ancestor.superview
+            }
+            return nil
+        }
+
         private func ensureWidthConstraint(
-            _ button: UIButton,
+            _ view: UIView,
             constant: CGFloat,
             relation: NSLayoutConstraint.Relation
         ) {
-            if let existing = button.constraints.first(where: {
-                ($0.firstItem as? UIView) === button
+            if let existing = equalWidthConstraint(for: view).flatMap({ existing in
+                existing.relation == relation ? existing : nil
+            }) {
+                existing.constant = constant
+                return
+            }
+            if let existing = view.constraints.first(where: {
+                ($0.firstItem as? UIView) === view
                     && $0.firstAttribute == .width
                     && $0.relation == relation
+                    && $0.secondItem == nil
             }) {
                 existing.constant = constant
                 return
             }
             let constraint = relation == .equal
-                ? button.widthAnchor.constraint(equalToConstant: constant)
-                : button.widthAnchor.constraint(greaterThanOrEqualToConstant: constant)
+                ? view.widthAnchor.constraint(equalToConstant: constant)
+                : view.widthAnchor.constraint(greaterThanOrEqualToConstant: constant)
             constraint.isActive = true
         }
 
