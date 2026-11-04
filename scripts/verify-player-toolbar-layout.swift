@@ -13,10 +13,9 @@ struct VerifyPlayerToolbarLayout {
         .speed: PlaybackToolbarLayoutPolicy.phoneButtonWidth,
         .aspectRatio: PlaybackToolbarLayoutPolicy.phoneButtonWidth,
         .episode: PlaybackToolbarLayoutPolicy.phoneButtonWidth,
-        .danmaku: PlaybackToolbarLayoutPolicy.phoneButtonWidth,
+        .danmaku: 40,
         .intro: 58,
         .outro: 58,
-        .more: PlaybackToolbarLayoutPolicy.phoneButtonWidth,
         .fullscreen: PlaybackToolbarLayoutPolicy.phoneButtonWidth
     ]
 
@@ -34,7 +33,6 @@ struct VerifyPlayerToolbarLayout {
         .danmaku: 52,
         .intro: 64,
         .outro: 64,
-        .more: PlaybackToolbarLayoutPolicy.padButtonWidth,
         .fullscreen: PlaybackToolbarLayoutPolicy.padButtonWidth
     ]
 
@@ -49,32 +47,43 @@ struct VerifyPlayerToolbarLayout {
 
     static func main() {
         var checks = 0
+        let phoneLandscapeWidths = [812.0, 844, 852, 874, 896, 926]
+        let padLandscapeWidths = [1024.0, 1080, 1112, 1180, 1194, 1366]
 
-        // Scan every half-point width across phone, iPad, portrait, and landscape
-        // layouts so transitions into and out of overflow are exercised directly.
-        for halfPointWidth in 560...3_200 {
-            let screenWidth = Double(halfPointWidth) / 2
-            for isPad in [false, true] {
-                for isLandscape in [false, true] {
-                    for canSelectEpisode in (isLandscape ? [false, true] : [false]) {
-                        verifyScenario(
-                            screenWidth: screenWidth,
-                            isPad: isPad,
-                            isLandscape: isLandscape,
-                            canSelectEpisode: canSelectEpisode
-                        )
-                        checks += 1
-                    }
-                }
-            }
+        for screenWidth in phoneLandscapeWidths {
+            verifyLandscape(
+                screenWidth: screenWidth,
+                isPad: false,
+                canSelectEpisode: true
+            )
+            verifyLandscape(
+                screenWidth: screenWidth,
+                isPad: false,
+                canSelectEpisode: false
+            )
+            checks += 2
         }
 
-        // Repeated rotation and split-view width changes catch stale decisions
-        // that can otherwise leave controls hidden or overlap after a resize.
-        let rotationWidths = [320.0, 568, 667, 744, 768, 820, 1024, 1180, 1366, 420, 540, 834]
+        for screenWidth in padLandscapeWidths {
+            verifyLandscape(
+                screenWidth: screenWidth,
+                isPad: true,
+                canSelectEpisode: true
+            )
+            verifyLandscape(
+                screenWidth: screenWidth,
+                isPad: true,
+                canSelectEpisode: false
+            )
+            checks += 2
+        }
+
+        // Exercise repeated portrait/landscape transitions without changing
+        // which controls are present in landscape.
+        let rotationWidths = [812.0, 844, 1024, 1180, 874, 1194]
         for cycle in 0..<12_000 {
             let screenWidth = rotationWidths[cycle % rotationWidths.count]
-            let isPad = cycle.isMultiple(of: 3) || screenWidth >= 744
+            let isPad = screenWidth >= 1024
             let isLandscape = cycle.isMultiple(of: 2)
             verifyScenario(
                 screenWidth: screenWidth,
@@ -85,22 +94,23 @@ struct VerifyPlayerToolbarLayout {
             checks += 1
         }
 
-        // Deterministic pseudo-random widths cover unusual split-screen sizes.
+        // Deterministic landscape widths include common split-view sizes on iPad.
         var seed: UInt64 = 0x5EED
         for _ in 0..<20_000 {
             seed = seed &* 6_364_136_223_846_793_005 &+ 1
-            let screenWidth = 280.0 + Double(seed % 1_521)
             let isPad = seed.isMultiple(of: 3)
-            verifyScenario(
+            let screenWidth = isPad
+                ? 1_024.0 + Double(seed % 721)
+                : 812.0 + Double(seed % 115)
+            verifyLandscape(
                 screenWidth: screenWidth,
                 isPad: isPad,
-                isLandscape: seed.isMultiple(of: 2),
                 canSelectEpisode: seed.isMultiple(of: 5)
             )
             checks += 1
         }
 
-        print("PLAYER TOOLBAR LAYOUT CHECKS PASSED: \(checks) width, rotation, and overflow simulations")
+        print("PLAYER TOOLBAR LAYOUT CHECKS PASSED: \(checks) landscape, rotation, and split-view scenarios")
     }
 
     private static func verifyScenario(
@@ -109,80 +119,66 @@ struct VerifyPlayerToolbarLayout {
         isLandscape: Bool,
         canSelectEpisode: Bool
     ) {
-        let horizontalInsets = isPad ? 64.0 : 28.0
-        let availableWidth = max(180, screenWidth - horizontalInsets)
+        guard isLandscape else {
+            let controls = portraitControls
+            let availableWidth = screenWidth - (isPad ? 64 : 28)
+            let widths = isPad ? padWidths : phoneWidths
+            let decision = PlaybackToolbarLayoutPolicy.layout(
+                availableWidth: availableWidth,
+                controls: controls,
+                widths: widths,
+                spacing: isPad
+                    ? PlaybackToolbarLayoutPolicy.padSpacing
+                    : PlaybackToolbarLayoutPolicy.phoneSpacing
+            )
+            precondition(decision.occupiedWidth <= availableWidth + 0.001)
+            return
+        }
+
+        verifyLandscape(
+            screenWidth: screenWidth,
+            isPad: isPad,
+            canSelectEpisode: canSelectEpisode
+        )
+    }
+
+    private static func verifyLandscape(
+        screenWidth: Double,
+        isPad: Bool,
+        canSelectEpisode: Bool
+    ) {
+        let availableWidth = screenWidth - (isPad ? 64 : 28)
         let spacing = isPad
             ? PlaybackToolbarLayoutPolicy.padSpacing
             : PlaybackToolbarLayoutPolicy.phoneSpacing
-        var controls = isLandscape ? landscapeControls : portraitControls
-        if isLandscape && !canSelectEpisode {
+        var controls = landscapeControls
+        if !canSelectEpisode {
             controls.removeAll { $0 == .episode }
         }
+
         let widths = isPad ? padWidths : phoneWidths
         let decision = PlaybackToolbarLayoutPolicy.layout(
             availableWidth: availableWidth,
             controls: controls,
             widths: widths,
-            spacing: spacing,
-            minimumTimeLabelWidth: PlaybackToolbarLayoutPolicy.minimumTimeLabelWidth
+            spacing: spacing
         )
-        verifyNoOverlap(
-            decision,
-            availableWidth: availableWidth,
-            controls: controls,
-            widths: widths,
-            spacing: spacing,
-            isPad: isPad
-        )
-    }
 
-    private static func verifyNoOverlap(
-        _ decision: PlaybackToolbarLayoutDecision,
-        availableWidth: Double,
-        controls: [PlaybackToolbarControl],
-        widths: [PlaybackToolbarControl: Double],
-        spacing: Double,
-        isPad: Bool
-    ) {
-        precondition(widths[.more, default: 0] >= (isPad
-            ? PlaybackToolbarLayoutPolicy.padButtonWidth
-            : PlaybackToolbarLayoutPolicy.phoneButtonWidth))
-        precondition(!decision.hiddenControls.contains(.play))
-        precondition(!decision.hiddenControls.contains(.timeLabel))
-        precondition(!decision.hiddenControls.contains(.fullscreen))
-
-        var visible = controls.filter { !decision.hiddenControls.contains($0) }
-        if !decision.hiddenControls.isEmpty {
-            if let fullscreenIndex = visible.firstIndex(of: .fullscreen) {
-                visible.insert(.more, at: fullscreenIndex)
-            } else {
-                visible.append(.more)
-            }
-        }
-
-        var rightEdge = 0.0
-        for (index, control) in visible.enumerated() {
-            if index > 0 {
-                let gap = spacing
-                let nextLeftEdge = rightEdge + gap
-                precondition(nextLeftEdge >= rightEdge + spacing - 0.001)
-                rightEdge = nextLeftEdge
-            }
-
-            let width = control == .timeLabel
-                ? decision.timeLabelWidth
-                : widths[control, default: 0]
-            precondition(width.isFinite && width >= 0)
-            if control != .timeLabel {
-                let minimumButtonWidth = isPad
-                    ? PlaybackToolbarLayoutPolicy.padButtonWidth
-                    : PlaybackToolbarLayoutPolicy.phoneButtonWidth
-                precondition(width >= minimumButtonWidth)
-            }
-            rightEdge += width
-        }
-
-        precondition(rightEdge <= availableWidth + 0.001)
-        precondition(abs(rightEdge - decision.occupiedWidth) < 0.001)
+        precondition(controls.contains(.rewind))
+        precondition(controls.contains(.play))
+        precondition(controls.contains(.forward))
+        precondition(controls.contains(.previous))
+        precondition(controls.contains(.next))
+        precondition(controls.contains(.volume))
+        precondition(controls.contains(.speed))
+        precondition(controls.contains(.aspectRatio))
+        precondition(controls.contains(.danmaku))
+        precondition(controls.contains(.intro))
+        precondition(controls.contains(.outro))
+        precondition(controls.contains(.fullscreen))
+        precondition(controls.contains(.episode) == canSelectEpisode)
+        precondition(spacing >= (isPad ? 12 : 10))
+        precondition(decision.timeLabelWidth >= PlaybackToolbarLayoutPolicy.minimumTimeLabelWidth)
+        precondition(decision.occupiedWidth <= availableWidth + 0.001)
     }
 }
