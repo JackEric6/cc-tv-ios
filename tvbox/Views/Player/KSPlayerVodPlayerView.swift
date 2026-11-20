@@ -165,6 +165,10 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
     private weak var observedVideoLayer: AVPlayerLayer?
     private var firstFrameObservation: NSKeyValueObservation?
     private var firstFrameStartPosition: TimeInterval = 0
+    private var firstFrameWatchdogActiveDuration: TimeInterval = 0
+    private var firstFrameWatchdogResumedAt: TimeInterval?
+    private var firstFrameWatchdogWorkItem: DispatchWorkItem?
+    private var firstFrameWatchdogGeneration = 0
     private var startPositionGeneration = 0
     private var startPositionRetryWorkItem: DispatchWorkItem?
     /// SwiftUI 可能在 KSPlayer 全屏转场期间重新配置同一个 UIView。
@@ -582,19 +586,23 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
         case .initialized, .preparing, .readyToPlay:
             showPlaybackLoadingIndicator()
         case .buffering:
+            pauseFirstFrameWatchdog()
             if !hidePlaybackLoadingIndicatorIfVideoIsPlaying(layer: layer) {
                 showPlaybackLoadingIndicator()
             }
         case .bufferFinished:
             if layer.player.isPlaying {
                 updatePlaybackControlIfPlaying(layer: layer)
+                scheduleFirstFrameWatchdog(for: layer)
             } else {
+                pauseFirstFrameWatchdog()
                 showPlaybackLoadingIndicator()
                 if !hasDisplayedCurrentVideoFrame, didStartInitialPlayback {
                     requestInitialPlayback(layer: layer)
                 }
             }
         case .paused:
+            pauseFirstFrameWatchdog()
             if hidePlaybackLoadingIndicatorIfVideoIsPlaying(layer: layer)
                 || (hasDisplayedCurrentVideoFrame && hasPlaybackAdvanced) {
                 hidePlaybackLoadingIndicator()
@@ -659,6 +667,7 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
 
     fileprivate func prepareInitialPlayback(startPosition: TimeInterval) {
         startPositionGeneration &+= 1
+        cancelFirstFrameWatchdog()
         startPositionRetryWorkItem?.cancel()
         startPositionRetryWorkItem = nil
         pendingStartPosition = VodPlaybackState.normalizedProgress(startPosition)
@@ -789,6 +798,9 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
             showPlaybackLoadingIndicator()
             play()
         }
+        if layer.player.isPlaying {
+            scheduleFirstFrameWatchdog(for: layer)
+        }
         if layer.player.isPlaying, hasDisplayedCurrentVideoFrame {
             updatePlaybackControlIfPlaying(layer: layer)
             if hasPlaybackAdvanced {
@@ -825,6 +837,80 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: workItem)
     }
 
+    private func scheduleFirstFrameWatchdog(for layer: KSPlayerLayer) {
+        guard playerLayer === layer else { return }
+        guard layer.state != .buffering, layer.state != .paused else {
+            pauseFirstFrameWatchdog()
+            return
+        }
+        guard firstFrameWatchdogWorkItem == nil,
+              !hasDisplayedCurrentVideoFrame,
+              !layer.player.tracks(mediaType: .video).isEmpty else {
+            return
+        }
+        if firstFrameWatchdogResumedAt == nil {
+            firstFrameWatchdogResumedAt = ProcessInfo.processInfo.systemUptime
+        }
+        let generation = firstFrameWatchdogGeneration
+        let workItem = DispatchWorkItem { [weak self, weak layer] in
+            guard let self, let layer,
+                  self.playerLayer === layer,
+                  self.firstFrameWatchdogGeneration == generation,
+                  !self.hasDisplayedCurrentVideoFrame else {
+                return
+            }
+            self.firstFrameWatchdogWorkItem = nil
+            let now = ProcessInfo.processInfo.systemUptime
+            let activeElapsed = PlaybackVideoFramePolicy.activePlaybackElapsed(
+                accumulated: self.firstFrameWatchdogActiveDuration,
+                resumedAt: self.firstFrameWatchdogResumedAt,
+                now: now
+            )
+            let playbackAdvance = layer.player.currentPlaybackTime - self.firstFrameStartPosition
+            if PlaybackVideoFramePolicy.shouldRecover(
+                elapsed: activeElapsed,
+                playbackAdvance: playbackAdvance,
+                isPlaying: layer.player.isPlaying && layer.state != .buffering && layer.state != .paused,
+                hasVideoTrack: !layer.player.tracks(mediaType: .video).isEmpty,
+                hasDisplayedFrame: self.hasDisplayedCurrentVideoFrame
+            ) {
+                self.cancelFirstFrameWatchdog()
+                self.playbackFailed = true
+                self.canShowPlaybackControl = true
+                self.hidePlaybackLoadingIndicator()
+                self.customControlsRefresh?()
+                self.onPlaybackFailure?()
+                return
+            }
+            if layer.player.isPlaying, layer.state != .buffering, layer.state != .paused {
+                self.scheduleFirstFrameWatchdog(for: layer)
+            } else {
+                self.pauseFirstFrameWatchdog()
+            }
+        }
+        firstFrameWatchdogWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: workItem)
+    }
+
+    private func pauseFirstFrameWatchdog() {
+        if let resumedAt = firstFrameWatchdogResumedAt {
+            firstFrameWatchdogActiveDuration = PlaybackVideoFramePolicy.activePlaybackElapsed(
+                accumulated: firstFrameWatchdogActiveDuration,
+                resumedAt: resumedAt,
+                now: ProcessInfo.processInfo.systemUptime
+            )
+            firstFrameWatchdogResumedAt = nil
+        }
+        firstFrameWatchdogGeneration &+= 1
+        firstFrameWatchdogWorkItem?.cancel()
+        firstFrameWatchdogWorkItem = nil
+    }
+
+    private func cancelFirstFrameWatchdog() {
+        pauseFirstFrameWatchdog()
+        firstFrameWatchdogActiveDuration = 0
+    }
+
     private func updatePlaybackControlIfPlaying(layer: KSPlayerLayer) {
         guard playerLayer === layer, layer.player.isPlaying else { return }
         if !canShowPlaybackControl {
@@ -838,6 +924,7 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
         if layer.player.tracks(mediaType: .video).isEmpty {
             hasDisplayedCurrentVideoFrame = true
             hasPlaybackAdvanced = true
+            cancelFirstFrameWatchdog()
         } else {
             installFirstFrameObservation(for: layer)
             if !hasPlaybackAdvanced {
@@ -854,6 +941,7 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
                 if currentTime.isFinite, currentTime - firstFrameStartPosition >= 0.25 {
                     hasDisplayedCurrentVideoFrame = true
                     hasPlaybackAdvanced = true
+                    cancelFirstFrameWatchdog()
                 }
             }
         }
@@ -877,6 +965,7 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
 
         firstFrameObservation?.invalidate()
         observedVideoLayer = renderLayer
+        let generation = startPositionGeneration
         firstFrameObservation = renderLayer.observe(
             \.isReadyForDisplay,
             options: [.initial, .new]
@@ -885,6 +974,7 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
             DispatchQueue.main.async {
                 guard let self, let layer,
                       self.playerLayer === layer,
+                      self.startPositionGeneration == generation,
                       self.observedVideoLayer === renderLayer,
                       layer.player.view?.layer === renderLayer else { return }
                 self.markFirstVideoFrameDisplayed(for: layer, renderedBy: renderLayer)
@@ -897,6 +987,7 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
               observedVideoLayer === renderLayer,
               layer.player.view?.layer === renderLayer else { return }
         hasDisplayedCurrentVideoFrame = true
+        cancelFirstFrameWatchdog()
         if !hasPlaybackAdvanced {
             let currentTime = layer.player.currentPlaybackTime
             if currentTime.isFinite, currentTime - firstFrameStartPosition >= 0.08 {
@@ -1246,6 +1337,7 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
     /// Pausing alone leaves the old AVPlayerItem and audio pipeline alive.
     func stopCurrentPlayback(reportFinalProgress: Bool = true) {
         startPositionGeneration &+= 1
+        cancelFirstFrameWatchdog()
         startPositionRetryWorkItem?.cancel()
         startPositionRetryWorkItem = nil
         let layer = playerLayer
@@ -1290,6 +1382,7 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
 
     func replacePlayback(url: URL, options: KSOptions) {
         let oldLayer = playerLayer
+        cancelFirstFrameWatchdog()
         oldLayer?.delegate = nil
         // The detail flow checkpoints history before rotating the session token.
         // Never send the retired layer's final callback through the new session.
