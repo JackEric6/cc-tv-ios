@@ -6,6 +6,11 @@ struct M3U8HostRule: Sendable {
     let regex: [String]
 }
 
+private struct M3U8ProbeGroup {
+    var segmentURLs: [String] = []
+    var duration: Double = 0
+}
+
 enum M3U8ManifestParser {
     static func firstVariantURL(in content: String, baseURL: URL) -> URL? {
         let lines = content
@@ -97,10 +102,21 @@ actor M3U8Purifier {
                 content = firstContent
             }
 
+            var segmentSignatures: [String: String] = [:]
+            if Self.isXiguaProbeHost(targetURL.host),
+               content.localizedCaseInsensitiveContains("#EXT-X-ENDLIST"),
+               content.localizedCaseInsensitiveContains("#EXT-X-DISCONTINUITY") {
+                segmentSignatures = await probeXiguaSegmentSignatures(
+                    baseURL: targetURL,
+                    content: content,
+                    headers: headers
+                )
+            }
             let result = M3U8ManifestPurifier.purify(
                 baseURL: targetURL,
                 content: content,
-                hostRules: hostRules
+                hostRules: hostRules,
+                segmentSignatures: segmentSignatures
             )
             guard result.removedSegmentCount > 0,
                   let proxyURL = try? await proxy.publish(content: result.content) else {
@@ -118,6 +134,123 @@ actor M3U8Purifier {
             // 净化是增强能力，网络失败不能阻断原始播放链路。
             return PreparedURL(url: urlString, didPurify: false, removedSegmentCount: 0)
         }
+    }
+
+    private func probeXiguaSegmentSignatures(
+        baseURL: URL,
+        content: String,
+        headers: [String: String]
+    ) async -> [String: String] {
+        let groups = Self.probeGroups(baseURL: baseURL, content: content)
+        guard groups.count >= 3 else { return [:] }
+
+        var targetIndices = Set<Int>()
+        for (index, group) in groups.enumerated()
+        where group.segmentURLs.count <= 3 || group.duration <= 12 {
+            for neighbor in max(0, index - 1)...min(groups.count - 1, index + 1) {
+                targetIndices.insert(neighbor)
+            }
+        }
+        let sortedTargetIndices = targetIndices.sorted()
+        let sampledTargetIndices: [Int]
+        if sortedTargetIndices.count <= 5 {
+            sampledTargetIndices = sortedTargetIndices
+        } else {
+            let lastIndex = sortedTargetIndices.count - 1
+            sampledTargetIndices = (0..<5).map { sample in
+                sortedTargetIndices[(sample * lastIndex) / 4]
+            }
+        }
+        let targets = sampledTargetIndices.compactMap { index -> String? in
+            groups[index].segmentURLs.first
+        }
+        guard !targets.isEmpty else { return [:] }
+
+        let network = self.network
+        let probedSignatures = await withTaskGroup(of: (String, String?).self) { group in
+            var signatures: [String: String] = [:]
+            for segmentURL in targets {
+                group.addTask {
+                    (segmentURL, await Self.probeSps(
+                        segmentURL,
+                        headers: headers,
+                        network: network
+                    ))
+                }
+            }
+            while let (segmentURL, signature) = await group.next() {
+                if let signature { signatures[segmentURL] = signature }
+            }
+            return signatures
+        }
+        var groupSignatures: [String: String] = [:]
+        for probeGroup in groups {
+            guard let firstURL = probeGroup.segmentURLs.first,
+                  let signature = probedSignatures[firstURL] else {
+                continue
+            }
+            for segmentURL in probeGroup.segmentURLs {
+                groupSignatures[segmentURL] = signature
+            }
+        }
+        return groupSignatures
+    }
+
+    private static func probeGroups(baseURL: URL, content: String) -> [M3U8ProbeGroup] {
+        var groups: [M3U8ProbeGroup] = []
+        var current = M3U8ProbeGroup()
+        var pendingDuration = 0.0
+
+        for raw in content.components(separatedBy: .newlines) {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line == "#EXT-X-DISCONTINUITY", !current.segmentURLs.isEmpty {
+                groups.append(current)
+                current = M3U8ProbeGroup()
+                pendingDuration = 0
+                continue
+            }
+            if line.uppercased().hasPrefix("#EXTINF:") {
+                let value = line.dropFirst("#EXTINF:".count)
+                    .split(separator: ",", maxSplits: 1)
+                    .first
+                    .flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+                pendingDuration = value ?? 0
+                continue
+            }
+            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+            guard let resolved = URL(string: line, relativeTo: baseURL)?.absoluteURL else { continue }
+            current.segmentURLs.append(resolved.absoluteString)
+            current.duration += pendingDuration
+            pendingDuration = 0
+        }
+        if !current.segmentURLs.isEmpty { groups.append(current) }
+        return groups
+    }
+
+    private static func probeSps(
+        _ url: String,
+        headers: [String: String],
+        network: NetworkManager
+    ) async -> String? {
+        var requestHeaders = headers
+        requestHeaders["Range"] = "bytes=0-524287"
+        guard let data = try? await network.getDataPrefix(
+            from: url,
+            headers: requestHeaders,
+            timeout: 3,
+            maxBytes: 512 * 1024
+        ) else {
+            return nil
+        }
+        return M3U8ManifestPurifier.h264SpsSignature(in: data)
+    }
+
+    private static func isXiguaProbeHost(_ host: String?) -> Bool {
+        guard let host = host?.lowercased() else { return false }
+        return host.range(
+            of: #"(?:^|\.)(?:xgplay\d*|xgzy|jimxtc)\."#,
+            options: .regularExpression
+        ) != nil
     }
 
     private static func isHTTPURL(_ url: URL) -> Bool {
@@ -386,7 +519,8 @@ struct M3U8ManifestPurifier {
     static func purify(
         baseURL: URL,
         content: String,
-        hostRules: [M3U8HostRule] = []
+        hostRules: [M3U8HostRule] = [],
+        segmentSignatures: [String: String] = [:]
     ) -> Result {
         let original = normalize(content)
         guard original.hasPrefix("#EXTM3U") else { return Result(content: content, removedSegmentCount: 0) }
@@ -411,6 +545,14 @@ struct M3U8ManifestPurifier {
             transformed = removeFrameRateGroups(transformed, removed: &removed)
             transformed = removeUniformDurationGroups(transformed, removed: &removed)
         }
+        if !segmentSignatures.isEmpty {
+            transformed = removeSpsVariantGroups(
+                transformed,
+                baseURL: baseURL,
+                signatures: segmentSignatures,
+                removed: &removed
+            )
+        }
         transformed = removeSuspiciousDiscontinuityGroups(transformed, removed: &removed)
         transformed = normalizeDiscontinuities(transformed)
 
@@ -424,6 +566,227 @@ struct M3U8ManifestPurifier {
             transformed += "#EXT-X-ENDLIST\n"
         }
         return Result(content: transformed, removedSegmentCount: removed)
+    }
+
+    private static func removeSpsVariantGroups(
+        _ content: String,
+        baseURL: URL,
+        signatures: [String: String],
+        removed: inout Int
+    ) -> String {
+        let groups = buildGroups(normalize(content).components(separatedBy: "\n"))
+        guard groups.count >= 3 else { return content }
+
+        let groupSignatures = groups.map { group -> String in
+            var counts: [String: Int] = [:]
+            for raw in group {
+                let uri = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !uri.isEmpty, !uri.hasPrefix("#"),
+                      let absolute = URL(string: uri, relativeTo: baseURL)?.absoluteURL.absoluteString,
+                      let signature = signatures[absolute] else {
+                    continue
+                }
+                counts[signature, default: 0] += 1
+            }
+            return counts.max(by: { $0.value < $1.value })?.key ?? ""
+        }
+        let knownSignatures = groupSignatures.filter { !$0.isEmpty }
+        guard knownSignatures.count >= 3 else { return content }
+
+        var signatureCounts: [String: Int] = [:]
+        for signature in knownSignatures {
+            signatureCounts[signature, default: 0] += 1
+        }
+        let rankedSignatures = signatureCounts.keys.sorted { left, right in
+            let leftCount = signatureCounts[left, default: 0]
+            let rightCount = signatureCounts[right, default: 0]
+            if leftCount != rightCount { return leftCount > rightCount }
+            let leftIndex = groupSignatures.firstIndex(of: left) ?? groups.count
+            let rightIndex = groupSignatures.firstIndex(of: right) ?? groups.count
+            return leftIndex < rightIndex
+        }
+        guard let dominantSignature = rankedSignatures.first,
+              let dominantCount = signatureCounts[dominantSignature],
+              dominantCount >= 3,
+              (rankedSignatures.dropFirst().first.flatMap { signatureCounts[$0] } ?? 0) < dominantCount else {
+            return content
+        }
+
+        var drop = Set<Int>()
+        var index = 0
+        while index < groups.count {
+            guard !groupSignatures[index].isEmpty,
+                  groupSignatures[index] != dominantSignature else {
+                index += 1
+                continue
+            }
+            let start = index
+            while index + 1 < groups.count,
+                  !groupSignatures[index + 1].isEmpty,
+                  groupSignatures[index + 1] != dominantSignature {
+                index += 1
+            }
+            let end = index
+            let run = start...end
+            let runDuration = run.reduce(0.0) { total, groupIndex in
+                total + groups[groupIndex].compactMap(parseDuration).reduce(0) { $0 + $1.value }
+            }
+            let runSegments = run.reduce(0) { $0 + mediaCount(groups[$1].joined(separator: "\n")) }
+            let bounded = start > 0 && end < groups.count - 1
+                && groupSignatures[start - 1] == dominantSignature
+                && groupSignatures[end + 1] == dominantSignature
+            let hasShortBoundary = run.contains { groupIndex in
+                let segmentCount = mediaCount(groups[groupIndex].joined(separator: "\n"))
+                let duration = groups[groupIndex].compactMap(parseDuration).reduce(0) { $0 + $1.value }
+                return segmentCount <= 3 || duration <= 12
+            }
+            // A single short group is ambiguous: the same alternate SPS can
+            // represent a legitimate encode switch elsewhere in the episode.
+            if bounded, runDuration > 0, runDuration <= 90,
+               runSegments <= 18, hasShortBoundary, run.count > 1 {
+                drop.formUnion(run)
+            }
+            index += 1
+        }
+        guard !drop.isEmpty else { return content }
+
+        var output: [String] = []
+        for groupIndex in groups.indices {
+            if drop.contains(groupIndex) {
+                removed += mediaCount(groups[groupIndex].joined(separator: "\n"))
+            } else {
+                output.append(contentsOf: groups[groupIndex])
+            }
+        }
+        return normalizeDiscontinuities(output.joined(separator: "\n"))
+    }
+
+    /// Return the first H.264 SPS NAL unit from the video PID in an MPEG-TS prefix.
+    static func h264SpsSignature(in data: Data) -> String? {
+        let bytes = [UInt8](data)
+        var pmtPID = -1
+        var videoPID = -1
+        var videoPayload = [UInt8]()
+        videoPayload.reserveCapacity(min(bytes.count, 512 * 1024))
+
+        var offset = 0
+        while offset + 188 <= bytes.count {
+            guard bytes[offset] == 0x47 else {
+                offset += 1
+                continue
+            }
+            let first = bytes[offset + 1]
+            let pid = (Int(first & 0x1F) << 8) | Int(bytes[offset + 2])
+            let adaptation = (bytes[offset + 3] >> 4) & 0x03
+            guard adaptation != 0 else {
+                offset += 188
+                continue
+            }
+            var payloadOffset = offset + 4
+            if adaptation == 2 || adaptation == 3 {
+                payloadOffset += 1 + Int(bytes[payloadOffset])
+            }
+            guard payloadOffset < offset + 188, adaptation != 2 else {
+                offset += 188
+                continue
+            }
+
+            let payload = Array(bytes[payloadOffset..<(offset + 188)])
+            let payloadUnitStart = (first & 0x40) != 0
+            if pid == 0, payloadUnitStart,
+               let sectionStart = sectionStart(in: payload),
+               payload[sectionStart] == 0 {
+                let sectionLength = (Int(payload[sectionStart + 1] & 0x0F) << 8)
+                    | Int(payload[sectionStart + 2])
+                let sectionEnd = min(payload.count, sectionStart + 3 + sectionLength - 4)
+                var cursor = sectionStart + 8
+                while cursor + 4 <= sectionEnd {
+                    let program = (Int(payload[cursor]) << 8) | Int(payload[cursor + 1])
+                    if program != 0 {
+                        pmtPID = (Int(payload[cursor + 2] & 0x1F) << 8)
+                            | Int(payload[cursor + 3])
+                        break
+                    }
+                    cursor += 4
+                }
+            } else if pid == pmtPID, pmtPID >= 0, payloadUnitStart,
+                      let sectionStart = sectionStart(in: payload),
+                      sectionStart + 12 <= payload.count,
+                      payload[sectionStart] == 2 {
+                let sectionLength = (Int(payload[sectionStart + 1] & 0x0F) << 8)
+                    | Int(payload[sectionStart + 2])
+                let programInfoLength = (Int(payload[sectionStart + 10] & 0x0F) << 8)
+                    | Int(payload[sectionStart + 11])
+                let sectionEnd = min(payload.count, sectionStart + 3 + sectionLength - 4)
+                var cursor = sectionStart + 12 + programInfoLength
+                while cursor + 5 <= sectionEnd {
+                    let streamType = payload[cursor]
+                    let elementaryPID = (Int(payload[cursor + 1] & 0x1F) << 8)
+                        | Int(payload[cursor + 2])
+                    let infoLength = (Int(payload[cursor + 3] & 0x0F) << 8)
+                        | Int(payload[cursor + 4])
+                    if streamType == 0x1B || streamType == 0x24 || streamType == 0x02 {
+                        videoPID = elementaryPID
+                        break
+                    }
+                    cursor += 5 + infoLength
+                }
+            } else if pid == videoPID, videoPID >= 0 {
+                let remaining = 512 * 1024 - videoPayload.count
+                if remaining > 0 {
+                    videoPayload.append(contentsOf: payload.prefix(remaining))
+                }
+                if videoPayload.count >= 512 * 1024 { break }
+            }
+            offset += 188
+        }
+        guard videoPID >= 0 else { return nil }
+
+        var index = 0
+        while index + 4 < videoPayload.count {
+            let startCodeLength: Int
+            if videoPayload[index] == 0, videoPayload[index + 1] == 0,
+               videoPayload[index + 2] == 1 {
+                startCodeLength = 3
+            } else if videoPayload[index] == 0, videoPayload[index + 1] == 0,
+                      videoPayload[index + 2] == 0, videoPayload[index + 3] == 1 {
+                startCodeLength = 4
+            } else {
+                index += 1
+                continue
+            }
+
+            let nalStart = index + startCodeLength
+            guard nalStart < videoPayload.count else { return nil }
+            if videoPayload[nalStart] & 0x1F == 7 {
+                var nalEnd = nalStart + 1
+                while nalEnd + 3 < videoPayload.count {
+                    let hasThreeByteStartCode = videoPayload[nalEnd] == 0
+                        && videoPayload[nalEnd + 1] == 0
+                        && videoPayload[nalEnd + 2] == 1
+                    let hasFourByteStartCode = videoPayload[nalEnd] == 0
+                        && videoPayload[nalEnd + 1] == 0
+                        && videoPayload[nalEnd + 2] == 0
+                        && videoPayload[nalEnd + 3] == 1
+                    if hasThreeByteStartCode || hasFourByteStartCode {
+                        break
+                    }
+                    nalEnd += 1
+                }
+                return videoPayload[nalStart..<nalEnd]
+                    .map { String(format: "%02x", $0) }
+                    .joined()
+            }
+            index = nalStart
+        }
+        return nil
+    }
+
+    private static func sectionStart(in payload: [UInt8]) -> Int? {
+        guard let pointer = payload.first else { return nil }
+        let start = 1 + Int(pointer)
+        guard start + 3 <= payload.count else { return nil }
+        return start
     }
 
     private static func normalize(_ content: String) -> String {

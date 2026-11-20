@@ -11,16 +11,27 @@ final class NetworkManager {
     private(set) var requestedURLs: [String] = []
     private(set) var requestedTimeouts: [Int?] = []
     private(set) var requestedRetryCounts: [Int] = []
+    private(set) var requestedDataURLs: [String] = []
+    private(set) var requestedDataHeaders: [[String: String]] = []
     private var responses: [String: String] = [:]
     private var finalURLs: [String: String] = [:]
+    private var dataResponses: [String: Data] = [:]
+    private let dataRequestLock = NSLock()
 
-    func configure(responses: [String: String], finalURLs: [String: String] = [:]) {
+    func configure(
+        responses: [String: String],
+        finalURLs: [String: String] = [:],
+        dataResponses: [String: Data] = [:]
+    ) {
         requestCount = 0
         requestedURLs = []
         requestedTimeouts = []
         requestedRetryCounts = []
+        requestedDataURLs = []
+        requestedDataHeaders = []
         self.responses = responses
         self.finalURLs = finalURLs
+        self.dataResponses = dataResponses
     }
 
     func getStringResponse(
@@ -39,11 +50,81 @@ final class NetworkManager {
         }
         return StringResponse(text: response, finalURL: finalURL)
     }
+
+    func getDataPrefix(
+        from url: String,
+        headers: [String: String] = [:],
+        timeout _: Int? = nil,
+        maxBytes: Int
+    ) async throws -> Data {
+        guard let data = recordDataRequest(url: url, headers: headers) else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        return Data(data.prefix(maxBytes))
+    }
+
+    private func recordDataRequest(url: String, headers: [String: String]) -> Data? {
+        dataRequestLock.lock()
+        defer { dataRequestLock.unlock() }
+        requestedDataURLs.append(url)
+        requestedDataHeaders.append(headers)
+        return dataResponses[url]
+    }
 }
 
 @main
 struct VerifyM3U8Purifier {
+    private static func transportStream(sps: [UInt8]) -> Data {
+        func packet(pid: Int, payload: [UInt8], startsUnit: Bool = true) -> [UInt8] {
+            var bytes: [UInt8] = [
+                0x47,
+                (startsUnit ? 0x40 : 0) | UInt8((pid >> 8) & 0x1F),
+                UInt8(pid & 0xFF),
+                0x10
+            ]
+            bytes.append(contentsOf: payload.prefix(184))
+            if bytes.count < 188 {
+                bytes.append(contentsOf: repeatElement(0xFF, count: 188 - bytes.count))
+            }
+            return bytes
+        }
+
+        let pat = packet(pid: 0, payload: [
+            0x00, 0x00, 0xB0, 0x0D, 0x00, 0x01, 0xC1, 0x00, 0x00,
+            0x00, 0x01, 0xE1, 0x00, 0x00, 0x00, 0x00, 0x00
+        ])
+        let pmt = packet(pid: 0x100, payload: [
+            0x00, 0x02, 0xB0, 0x12, 0x00, 0x01, 0xC1, 0x00, 0x00,
+            0xE1, 0x01, 0xF0, 0x00, 0x1B, 0xE1, 0x01, 0xF0, 0x00,
+            0x00, 0x00, 0x00, 0x00
+        ])
+        var videoPayload: [UInt8] = [0x00, 0x00, 0x01, 0xE0, 0, 0, 0x80, 0, 0]
+        videoPayload += [0x00, 0x00, 0x01] + sps
+        videoPayload += [0x00, 0x00, 0x01, 0x68]
+        let video = packet(pid: 0x101, payload: videoPayload)
+        return Data(pat + pmt + video)
+    }
+
     static func main() async throws {
+        let mainTS = transportStream(sps: [0x67, 0x64, 0x00, 0x1F, 0xAA])
+        let adTS = transportStream(sps: [0x67, 0x4D, 0x00, 0x28, 0xBB])
+        precondition(
+            M3U8ManifestPurifier.h264SpsSignature(in: mainTS) == "6764001faa",
+            "The TS probe should extract the video PID's SPS"
+        )
+        precondition(
+            M3U8ManifestPurifier.h264SpsSignature(in: adTS) == "674d0028bb",
+            "Different SPS variants should have different signatures"
+        )
+        let spsWithNonStartCodePair = transportStream(
+            sps: [0x67, 0x64, 0x00, 0x1F, 0xAA, 0xBB, 0x00, 0x01, 0xCC]
+        )
+        precondition(
+            M3U8ManifestPurifier.h264SpsSignature(in: spsWithNonStartCodePair)
+                == "6764001faabb0001cc",
+            "SPS data must only end at a complete three- or four-byte Annex B start code"
+        )
+
         let manifest = """
         #EXTM3U
         #EXT-X-VERSION:3
@@ -571,6 +652,131 @@ struct VerifyM3U8Purifier {
                 && xiguaPrepared.removedSegmentCount == 0,
             "Xigua should keep the original master URL when generic Android rules find no ads"
         )
+        precondition(
+            NetworkManager.shared.requestedDataURLs.count == 3,
+            "Only short Xigua VOD groups and their neighboring groups should be probed"
+        )
+        precondition(
+            NetworkManager.shared.requestedDataHeaders.allSatisfy {
+                $0["User-Agent"] == "Xigua test" && $0["Range"] == "bytes=0-524287"
+            },
+            "SPS probes must preserve playback headers and use a bounded Range request"
+        )
+
+        let xiguaProbeMasterURL = "https://svip.xgplay13.com/series/episode/master.m3u8?token=master"
+        let xiguaProbeVariantURL = "https://svip.xgplay13.com/series/episode/media.m3u8?token=variant"
+        var xiguaProbeLines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-PLAYLIST-TYPE:VOD", "#EXT-X-TARGETDURATION:8"]
+        var probeData: [String: Data] = [:]
+        for group in 0..<5 {
+            if group > 0 { xiguaProbeLines.append("#EXT-X-DISCONTINUITY") }
+            let segmentCount = group == 1 || group == 2 || group == 3 ? 3 : 4
+            for segment in 0..<segmentCount {
+                let segmentURL = "https://svip.xgplay13.com/series/\(group)-\(segment).ts?token=\(group)-\(segment)"
+                xiguaProbeLines.append("#EXTINF:4.000,")
+                xiguaProbeLines.append(segmentURL)
+                if segment == 0 {
+                    probeData[segmentURL] = group == 1 || group == 2 ? adTS : mainTS
+                }
+            }
+        }
+        xiguaProbeLines.append("#EXT-X-ENDLIST")
+        let xiguaProbeManifest = xiguaProbeLines.joined(separator: "\n")
+        NetworkManager.shared.configure(
+            responses: [
+                xiguaProbeMasterURL: """
+                #EXTM3U
+                #EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=1920x1080
+                media.m3u8?token=variant
+                """,
+                xiguaProbeVariantURL: xiguaProbeManifest
+            ],
+            dataResponses: probeData
+        )
+        let xiguaProbePrepared = await M3U8Purifier.shared.prepare(
+            urlString: xiguaProbeMasterURL,
+            headers: ["User-Agent": "Xigua test"],
+            sourceKey: "xgzy"
+        )
+        precondition(
+            NetworkManager.shared.requestedDataURLs.count == 5,
+            "Probe flow should sample one segment per bounded group"
+        )
+        precondition(
+            xiguaProbePrepared.didPurify && xiguaProbePrepared.removedSegmentCount == 6,
+            "Repeated non-main SPS groups should be removed from the Xigua VOD manifest"
+        )
+        let (xiguaProbeData, _) = try await URLSession.shared.data(from: URL(string: xiguaProbePrepared.url)!)
+        let xiguaProbeOutput = String(decoding: xiguaProbeData, as: UTF8.self)
+        precondition(!xiguaProbeOutput.contains("1-0.ts") && !xiguaProbeOutput.contains("2-0.ts"))
+        precondition(xiguaProbeOutput.contains("0-0.ts") && xiguaProbeOutput.contains("3-0.ts"))
+
+        var oneVariantLines = ["#EXTM3U", "#EXT-X-TARGETDURATION:8"]
+        let oneVariantSignatures = [
+            "https://cdn.example/video/main-1.ts": "main",
+            "https://cdn.example/video/main-2.ts": "main",
+            "https://cdn.example/video/variant-1.ts": "alternate",
+            "https://cdn.example/video/variant-2.ts": "alternate",
+            "https://cdn.example/video/variant-3.ts": "alternate",
+            "https://cdn.example/video/main-3.ts": "main",
+            "https://cdn.example/video/main-4.ts": "main"
+        ]
+        for (index, group) in [
+            ["main-1.ts", "main-2.ts"],
+            ["variant-1.ts", "variant-2.ts", "variant-3.ts"],
+            ["main-3.ts", "main-4.ts"],
+            ["main-5.ts", "main-6.ts"]
+        ].enumerated() {
+            if index > 0 { oneVariantLines.append("#EXT-X-DISCONTINUITY") }
+            for segment in group {
+                oneVariantLines.append("#EXTINF:4.000,")
+                oneVariantLines.append("https://cdn.example/video/\(segment)")
+            }
+        }
+        oneVariantLines.append("#EXT-X-ENDLIST")
+        var oneVariantMap = oneVariantSignatures
+        oneVariantMap["https://cdn.example/video/main-5.ts"] = "main"
+        oneVariantMap["https://cdn.example/video/main-6.ts"] = "main"
+        let oneVariantManifest = oneVariantLines.joined(separator: "\n")
+        let oneVariantResult = M3U8ManifestPurifier.purify(
+            baseURL: URL(string: "https://cdn.example/video/index.m3u8")!,
+            content: oneVariantManifest,
+            segmentSignatures: oneVariantMap
+        )
+        precondition(oneVariantResult.removedSegmentCount == 0)
+        precondition(oneVariantResult.content.contains("variant-1.ts"))
+        precondition(oneVariantResult.content.contains("variant-3.ts"))
+
+        var intermittentVariantLines = ["#EXTM3U", "#EXT-X-TARGETDURATION:8"]
+        var intermittentVariantSignatures: [String: String] = [:]
+        let intermittentGroups = [
+            ("main-a", "main", 4),
+            ("alternate-a", "alternate", 3),
+            ("main-b", "main", 4),
+            ("alternate-b", "alternate", 3),
+            ("main-c", "main", 4)
+        ]
+        for (groupIndex, group) in intermittentGroups.enumerated() {
+            if groupIndex > 0 { intermittentVariantLines.append("#EXT-X-DISCONTINUITY") }
+            for segmentIndex in 0..<group.2 {
+                let name = "\(group.0)-\(segmentIndex).ts"
+                let url = "https://cdn.example/video/\(name)"
+                intermittentVariantLines.append("#EXTINF:4.000,")
+                intermittentVariantLines.append(url)
+                intermittentVariantSignatures[url] = group.1
+            }
+        }
+        intermittentVariantLines.append("#EXT-X-ENDLIST")
+        let intermittentVariantResult = M3U8ManifestPurifier.purify(
+            baseURL: URL(string: "https://cdn.example/video/index.m3u8")!,
+            content: intermittentVariantLines.joined(separator: "\n"),
+            segmentSignatures: intermittentVariantSignatures
+        )
+        precondition(
+            intermittentVariantResult.removedSegmentCount == 0,
+            "Repeated alternate SPS groups separated by the main encoding should be preserved"
+        )
+        precondition(intermittentVariantResult.content.contains("alternate-a-0.ts"))
+        precondition(intermittentVariantResult.content.contains("alternate-b-0.ts"))
 
         let redirectedMasterURL = "https://origin.example/redirect/master.m3u8?ticket=one"
         let redirectedMasterFinalURL = "https://media.example/live/master.m3u8?session=two"

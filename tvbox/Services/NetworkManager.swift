@@ -160,6 +160,43 @@ class NetworkManager {
         return data
     }
 
+    /// GET a bounded prefix of a response while preserving playback headers.
+    /// Range is requested as an optimization, but the byte limit is still
+    /// enforced when an origin ignores Range.
+    func getDataPrefix(
+        from urlString: String,
+        headers: [String: String]? = nil,
+        timeout: Int? = nil,
+        maxBytes: Int
+    ) async throws -> Data {
+        guard let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            throw NetworkError.invalidURL(urlString)
+        }
+        guard maxBytes > 0 else { return Data() }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = TimeInterval(timeout.flatMap { $0 > 0 ? $0 : nil } ?? 3)
+        headers?.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw NetworkError.invalidResponse
+        }
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw NetworkError.httpError(httpResponse.statusCode)
+        }
+
+        var prefix = Data()
+        prefix.reserveCapacity(maxBytes)
+        for try await byte in bytes {
+            prefix.append(byte)
+            if prefix.count >= maxBytes { break }
+        }
+        return prefix
+    }
+
     // MARK: - 带重试的核心请求方法
 
     /// 执行 HTTP 请求，遇到可重试错误时自动指数退避重试。
