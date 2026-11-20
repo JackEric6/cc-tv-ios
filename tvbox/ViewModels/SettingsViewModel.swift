@@ -52,8 +52,6 @@ class SettingsViewModel: ObservableObject {
     @Published var vlcBufferMode: VLCBufferMode = .defaultMode
     /// 快进/快退步长（秒）。
     @Published var playTimeStep: Int = 10
-    /// 是否在播放前净化 M3U8 广告分片。
-    @Published var m3u8Purify: Bool = true
     /// 是否让应用网络请求使用系统代理，默认关闭。
     @Published var useSystemProxy: Bool = false
     /// 缓存占用展示文本。
@@ -75,10 +73,7 @@ class SettingsViewModel: ObservableObject {
     init() {
         let defaults = UserDefaults.standard
         CongcongBrand.migrateLegacyDefaultConfig(in: defaults)
-        if defaults.object(forKey: M3U8PurifierSettings.key) == nil {
-            defaults.set(true, forKey: M3U8PurifierSettings.key)
-        }
-        m3u8Purify = defaults.bool(forKey: M3U8PurifierSettings.key)
+        M3U8PurifierSettings.enforceEnabled()
         useSystemProxy = NetworkProxyPolicy.useSystemProxy
         let savedVod = defaults.string(forKey: HawkConfig.API_URL) ?? CongcongBrand.defaultConfigURL
         vodApiUrl = savedVod
@@ -274,12 +269,6 @@ class SettingsViewModel: ObservableObject {
         guard step > 0 else { return }
         playTimeStep = step
         UserDefaults.standard.set(step, forKey: HawkConfig.PLAY_TIME_STEP)
-    }
-
-    /// 设置 M3U8 净化开关。
-    func setM3U8Purify(_ enabled: Bool) {
-        m3u8Purify = enabled
-        UserDefaults.standard.set(enabled, forKey: M3U8PurifierSettings.key)
     }
 
     /// 设置应用网络是否跟随系统代理。新建的网络会话会立即使用该策略。

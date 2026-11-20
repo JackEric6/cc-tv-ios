@@ -232,7 +232,9 @@ class NetworkManager {
                 throw CancellationError()
             } catch {
                 lastError = error
-                if Self.isRetryableError(error) && attempt < totalAttempts - 1 {
+                if !Task.isCancelled,
+                   Self.isRetryableError(error),
+                   attempt < totalAttempts - 1 {
                     try await retryDelay(attempt: attempt)
                     continue
                 }
@@ -275,6 +277,7 @@ class NetworkManager {
         if nsError.domain == NSURLErrorDomain {
             switch nsError.code {
             case NSURLErrorTimedOut,
+                 NSURLErrorCancelled,
                  NSURLErrorCannotFindHost,
                  NSURLErrorCannotConnectToHost,
                  NSURLErrorNetworkConnectionLost,

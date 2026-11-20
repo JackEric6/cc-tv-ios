@@ -31,7 +31,6 @@ struct SettingsView: View {
         case decode
         case vlcBuffer
         case playTimeStep
-        case m3u8Purify
         case systemProxy
     }
 
@@ -69,11 +68,10 @@ struct SettingsView: View {
                         SettingsRow(
                             icon: "wand.and.stars",
                             title: "M3U8 净化",
-                            value: viewModel.m3u8Purify ? "开启" : "关闭",
-                            iconColor: .orange
-                        ) {
-                            showingPicker = .m3u8Purify
-                        }
+                            value: "始终开启",
+                            iconColor: .orange,
+                            action: nil
+                        )
                         Divider().background(Color.white.opacity(0.1))
                         SettingsRow(
                             icon: "network",
@@ -119,7 +117,12 @@ struct SettingsView: View {
                         Divider().background(Color.white.opacity(0.1))
                         SettingsRow(icon: "person.crop.circle", title: "关于", value: CongcongBrand.credit, action: nil)
                         Divider().background(Color.white.opacity(0.1))
-                        SettingsRow(icon: "info.circle", title: "版本", value: "1.0.8", action: nil)
+                        SettingsRow(
+                            icon: "info.circle",
+                            title: "版本",
+                            value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0",
+                            action: nil
+                        )
                         Divider().background(Color.white.opacity(0.1))
                         SettingsRow(icon: "globe", title: "站点数量", value: "\(apiConfig.sourceBeanList.count)", action: nil)
                         Divider().background(Color.white.opacity(0.1))
@@ -183,20 +186,6 @@ struct SettingsView: View {
                 itemTitle: { "\($0) 秒" },
                 onSelect: { step in
                     viewModel.setPlayTimeStep(step)
-                    showingPicker = .none
-                },
-                onCancel: { showingPicker = .none }
-            )
-        case .m3u8Purify:
-            SelectionModal(
-                title: "M3U8 净化",
-                icon: "wand.and.stars",
-                accentColor: .yellow,
-                items: BinaryChoice.allCases,
-                selectedItem: viewModel.m3u8Purify ? .enabled : .disabled,
-                itemTitle: { $0.title },
-                onSelect: { choice in
-                    viewModel.setM3U8Purify(choice == .enabled)
                     showingPicker = .none
                 },
                 onCancel: { showingPicker = .none }

@@ -44,6 +44,7 @@ enum M3U8ManifestParser {
 /// 分片、密钥和子资源会被改写成绝对地址，因此播放器不需要额外的代理能力。
 actor M3U8Purifier {
     static let shared = M3U8Purifier()
+    private static let manifestRequestRetries = 1
 
     struct PreparedURL: Sendable {
         let url: String
@@ -79,7 +80,7 @@ actor M3U8Purifier {
                 from: url.absoluteString,
                 headers: headers.isEmpty ? nil : headers,
                 timeout: 5,
-                maxRetries: 0
+                maxRetries: Self.manifestRequestRetries
             )
             let firstContent = Self.normalizeManifest(firstResponse.text)
             guard firstContent.hasPrefix("#EXTM3U") else {
@@ -93,7 +94,7 @@ actor M3U8Purifier {
                     from: variant.absoluteString,
                     headers: headers.isEmpty ? nil : headers,
                     timeout: 5,
-                    maxRetries: 0
+                    maxRetries: Self.manifestRequestRetries
                 )
                 targetURL = variantResponse.finalURL
                 content = Self.normalizeManifest(variantResponse.text)
@@ -119,7 +120,7 @@ actor M3U8Purifier {
                 segmentSignatures: segmentSignatures
             )
             guard result.removedSegmentCount > 0,
-                  let proxyURL = try? await proxy.publish(content: result.content) else {
+                  let proxyURL = await publishWithRetry(content: result.content) else {
                 // Keep the original URL when no filtering occurred. Replacing a
                 // master playlist with its first variant can drop query tokens
                 // and bypass the player's normal variant selection.
@@ -134,6 +135,19 @@ actor M3U8Purifier {
             // 净化是增强能力，网络失败不能阻断原始播放链路。
             return PreparedURL(url: urlString, didPurify: false, removedSegmentCount: 0)
         }
+    }
+
+    private func publishWithRetry(content: String) async -> String? {
+        for attempt in 0...1 {
+            do {
+                return try await proxy.publish(content: content)
+            } catch {
+                guard attempt == 0, !Task.isCancelled else { return nil }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard !Task.isCancelled else { return nil }
+            }
+        }
+        return nil
     }
 
     private func probeXiguaSegmentSignatures(
@@ -234,15 +248,22 @@ actor M3U8Purifier {
     ) async -> String? {
         var requestHeaders = headers
         requestHeaders["Range"] = "bytes=0-524287"
-        guard let data = try? await network.getDataPrefix(
-            from: url,
-            headers: requestHeaders,
-            timeout: 3,
-            maxBytes: 512 * 1024
-        ) else {
-            return nil
+        for attempt in 0...1 {
+            do {
+                let data = try await network.getDataPrefix(
+                    from: url,
+                    headers: requestHeaders,
+                    timeout: 3,
+                    maxBytes: 512 * 1024
+                )
+                return M3U8ManifestPurifier.h264SpsSignature(in: data)
+            } catch {
+                guard attempt == 0, !Task.isCancelled else { return nil }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard !Task.isCancelled else { return nil }
+            }
         }
-        return M3U8ManifestPurifier.h264SpsSignature(in: data)
+        return nil
     }
 
     private static func isXiguaProbeHost(_ host: String?) -> Bool {
@@ -279,13 +300,13 @@ struct M3U8PurifierSettings {
     static let key = "m3u8_purify"
     static let defaultEnabled = true
 
+    static func enforceEnabled() {
+        UserDefaults.standard.set(defaultEnabled, forKey: key)
+    }
+
     static var isEnabled: Bool {
-        let defaults = UserDefaults.standard
-        if defaults.object(forKey: key) == nil {
-            defaults.set(defaultEnabled, forKey: key)
-            return defaultEnabled
-        }
-        return defaults.bool(forKey: key)
+        enforceEnabled()
+        return defaultEnabled
     }
 }
 

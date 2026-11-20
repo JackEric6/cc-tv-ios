@@ -16,12 +16,14 @@ final class NetworkManager {
     private var responses: [String: String] = [:]
     private var finalURLs: [String: String] = [:]
     private var dataResponses: [String: Data] = [:]
+    private var transientFailures: [String: Int] = [:]
     private let dataRequestLock = NSLock()
 
     func configure(
         responses: [String: String],
         finalURLs: [String: String] = [:],
-        dataResponses: [String: Data] = [:]
+        dataResponses: [String: Data] = [:],
+        transientFailures: [String: Int] = [:]
     ) {
         requestCount = 0
         requestedURLs = []
@@ -32,6 +34,7 @@ final class NetworkManager {
         self.responses = responses
         self.finalURLs = finalURLs
         self.dataResponses = dataResponses
+        self.transientFailures = transientFailures
     }
 
     func getStringResponse(
@@ -40,15 +43,24 @@ final class NetworkManager {
         timeout: Int? = nil,
         maxRetries: Int = 3
     ) async throws -> StringResponse {
-        requestCount += 1
-        requestedURLs.append(url)
-        requestedTimeouts.append(timeout)
-        requestedRetryCounts.append(maxRetries)
-        guard let response = responses[url] else { throw CocoaError(.fileReadUnknown) }
-        guard let finalURL = URL(string: finalURLs[url] ?? url) else {
-            throw CocoaError(.fileReadCorruptFile)
+        let attempts = max(1, maxRetries + 1)
+        for attempt in 0..<attempts {
+            requestCount += 1
+            requestedURLs.append(url)
+            requestedTimeouts.append(timeout)
+            requestedRetryCounts.append(maxRetries)
+            if let remaining = transientFailures[url], remaining > 0 {
+                transientFailures[url] = remaining - 1
+                if attempt < attempts - 1 { continue }
+                throw CocoaError(.fileReadUnknown)
+            }
+            guard let response = responses[url] else { throw CocoaError(.fileReadUnknown) }
+            guard let finalURL = URL(string: finalURLs[url] ?? url) else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            return StringResponse(text: response, finalURL: finalURL)
         }
-        return StringResponse(text: response, finalURL: finalURL)
+        throw CocoaError(.fileReadUnknown)
     }
 
     func getDataPrefix(
@@ -279,6 +291,44 @@ struct VerifyM3U8Purifier {
         })
 
         precondition(M3U8PurifierSettings.defaultEnabled)
+        UserDefaults.standard.set(false, forKey: M3U8PurifierSettings.key)
+        precondition(M3U8PurifierSettings.isEnabled)
+        precondition(
+            UserDefaults.standard.bool(forKey: M3U8PurifierSettings.key),
+            "A previously disabled purifier preference must be migrated back to enabled"
+        )
+
+        let retryManifestURL = "https://cdn.example/retry/index.m3u8"
+        let retryManifest = [
+            "#EXTM3U",
+            "#EXT-X-TARGETDURATION:6",
+            "#EXTINF:6.0,",
+            "https://cdn.example/retry/main-1.ts",
+            "#EXT-X-CUE-OUT:DURATION=6",
+            "#EXTINF:6.0,",
+            "https://cdn.example/retry/ads/ad-1.ts",
+            "#EXT-X-CUE-IN",
+            "#EXTINF:6.0,",
+            "https://cdn.example/retry/main-2.ts",
+            "#EXT-X-ENDLIST"
+        ].joined(separator: "\n")
+        NetworkManager.shared.configure(
+            responses: [retryManifestURL: retryManifest],
+            transientFailures: [retryManifestURL: 1]
+        )
+        UserDefaults.standard.set(false, forKey: M3U8PurifierSettings.key)
+        let retriedPrepared = await M3U8Purifier.shared.prepare(
+            urlString: retryManifestURL,
+            headers: [:],
+            sourceKey: "ffzy"
+        )
+        precondition(retriedPrepared.didPurify && retriedPrepared.removedSegmentCount == 1)
+        precondition(
+            NetworkManager.shared.requestedURLs == [retryManifestURL, retryManifestURL],
+            "A single transient manifest failure should be retried before falling back"
+        )
+        precondition(NetworkManager.shared.requestedRetryCounts == [1, 1])
+        precondition(UserDefaults.standard.bool(forKey: M3U8PurifierSettings.key))
 
         var frameRateLines = ["#EXTM3U", "#EXT-X-TARGETDURATION:5", "#EXT-X-DISCONTINUITY"]
         for index in 1...20 {
@@ -645,7 +695,7 @@ struct VerifyM3U8Purifier {
             "Xigua playback requested \(NetworkManager.shared.requestedURLs); expected the master and resolved media playlist"
         )
         precondition(NetworkManager.shared.requestedTimeouts.compactMap { $0 } == [5, 5])
-        precondition(NetworkManager.shared.requestedRetryCounts == [0, 0])
+        precondition(NetworkManager.shared.requestedRetryCounts == [1, 1])
         precondition(
             xiguaPrepared.url == xiguaMasterURL
                 && !xiguaPrepared.didPurify
@@ -653,8 +703,8 @@ struct VerifyM3U8Purifier {
             "Xigua should keep the original master URL when generic Android rules find no ads"
         )
         precondition(
-            NetworkManager.shared.requestedDataURLs.count == 3,
-            "Only short Xigua VOD groups and their neighboring groups should be probed"
+            NetworkManager.shared.requestedDataURLs.count == 6,
+            "Failed Xigua SPS probes should each receive one retry"
         )
         precondition(
             NetworkManager.shared.requestedDataHeaders.allSatisfy {
