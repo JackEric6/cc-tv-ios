@@ -4,6 +4,7 @@ Actions 运行本身保存在 GitHub；此文件将重要构建与源码提交�
 
 | 时间（UTC） | 分支 | 源码提交 | 结果 | Actions 运行 |
 | --- | --- | --- | --- | --- |
+| 2026-11-20 12:03 | `main` | `468f2e1` | 成功并已发布；版本 `1.0.8 (12)`，Windows 西瓜 SPS 插片净化迁移、切集首帧恢复及回归检查通过；IPA 已附加到 Release | [44731169006](https://github.com/JackEric6/cc-tv-ios/actions/runs/44731169006) · [Release 1.0.8](https://github.com/JackEric6/cc-tv-ios/releases/tag/1.0.8) |
 | 2026-11-04 23:44 | `main` | `e3b3c0e` | 成功并已发布；恢复 1.0.6 播放器按钮宽度与间距，版本 `1.0.7 (11)`；CI runner 调整提交 `7ef18a1`；Release 编译、布局及源码校验、元数据检查、IPA 打包和上传均通过 | [41934499545](https://github.com/JackEric6/cc-tv-ios/actions/runs/41934499545) · [Release 1.0.7](https://github.com/JackEric6/cc-tv-ios/releases/tag/1.0.7) |
 | 2026-11-04 14:43 | `main` | `40e238b` | 成功；版本 `1.0.7 (10)`，全控件横屏布局回归、Release 编译、元数据校验及 IPA 打包通过；本地保留未签名 IPA | [41848448122](https://github.com/JackEric6/cc-tv-ios/actions/runs/41848448122) |
 | 2026-11-04 13:09 | `main` | `589331f` | 成功；版本 `1.0.6 (9)`，片尾标记改为按本集剩余时间切集；已更新 GitHub Release，附件为 `CongcongTV-unsigned-1.0.6.ipa` | [41835603498](https://github.com/JackEric6/cc-tv-ios/actions/runs/41835603498) · [Release 1.0.6](https://github.com/JackEric6/cc-tv-ios/releases/tag/1.0.6) |
@@ -18,10 +19,10 @@ Actions 运行本身保存在 GitHub；此文件将重要构建与源码提交�
 
 ## 版本标记
 
-- `MARKETING_VERSION`: `1.0.7`
-- `CURRENT_PROJECT_VERSION`: `11`
+- `MARKETING_VERSION`: `1.0.8`
+- `CURRENT_PROJECT_VERSION`: `12`
 - 版本字段定义在 `project.yml`；日常迭代由 Git commit 和 Actions run 追踪。发布到需要唯一构建号的平台前，应先提升构建号。
 
 ## 构建产物
 
-工作流 `Build CongcongTV iOS IPA (XGZY)` 上传的 IPA 文件名包含版本号，例如 `CongcongTV-unsigned-1.0.7.ipa`，并附带 `build.log`。在对应 Actions 运行页面下载；artifact 按 GitHub 的保留期限保存，过期后可重新运行 workflow 构建。
+工作流 `Build CongcongTV iOS IPA (XGZY)` 上传的 IPA 文件名包含版本号，例如 `CongcongTV-unsigned-1.0.8.ipa`，并附带 `build.log`。在对应 Actions 运行页面下载；artifact 按 GitHub 的保留期限保存，过期后可重新运行 workflow 构建。
