@@ -703,8 +703,8 @@ struct VerifyM3U8Purifier {
             "Xigua should keep the original master URL when generic Android rules find no ads"
         )
         precondition(
-            NetworkManager.shared.requestedDataURLs.count == 6,
-            "Failed Xigua SPS probes should each receive one retry"
+            NetworkManager.shared.requestedDataURLs.count == 12,
+            "Failed Xigua SPS probes should retry each of the first three candidates"
         )
         precondition(
             NetworkManager.shared.requestedDataHeaders.allSatisfy {
