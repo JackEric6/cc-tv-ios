@@ -725,7 +725,11 @@ struct VerifyM3U8Purifier {
                 xiguaProbeLines.append("#EXTINF:4.000,")
                 xiguaProbeLines.append(segmentURL)
                 if segment == 0 {
-                    probeData[segmentURL] = group == 1 || group == 2 ? adTS : mainTS
+                    if group == 1 || group == 2 {
+                        probeData[segmentURL] = adTS
+                    } else if group == 0 || group == 4 {
+                        probeData[segmentURL] = mainTS
+                    }
                 } else if group == 3 && segment == 2 {
                     // The first two parts of this group fail, but Android's
                     // rule retries the third part before giving up.
