@@ -76,9 +76,14 @@ actor M3U8Purifier {
         }
 
         do {
+            let requestHeaders = Self.xiguaRequestHeaders(
+                for: url,
+                headers: headers,
+                force: Self.xiguaSourceKey(normalizedSource)
+            )
             let firstResponse = try await network.getStringResponse(
                 from: url.absoluteString,
-                headers: headers.isEmpty ? nil : headers,
+                headers: requestHeaders.isEmpty ? nil : requestHeaders,
                 timeout: 5,
                 maxRetries: Self.manifestRequestRetries
             )
@@ -90,9 +95,14 @@ actor M3U8Purifier {
             let targetURL: URL
             let content: String
             if let variant = M3U8ManifestParser.firstVariantURL(in: firstContent, baseURL: firstResponse.finalURL) {
+                let variantHeaders = Self.xiguaRequestHeaders(
+                    for: variant,
+                    headers: requestHeaders,
+                    force: Self.xiguaSourceKey(normalizedSource)
+                )
                 let variantResponse = try await network.getStringResponse(
                     from: variant.absoluteString,
-                    headers: headers.isEmpty ? nil : headers,
+                    headers: variantHeaders.isEmpty ? nil : variantHeaders,
                     timeout: 5,
                     maxRetries: Self.manifestRequestRetries
                 )
@@ -110,7 +120,11 @@ actor M3U8Purifier {
                 segmentSignatures = await probeXiguaSegmentSignatures(
                     baseURL: targetURL,
                     content: content,
-                    headers: headers
+                    headers: Self.xiguaRequestHeaders(
+                        for: targetURL,
+                        headers: requestHeaders,
+                        force: Self.xiguaSourceKey(normalizedSource)
+                    )
                 )
             }
             let result = M3U8ManifestPurifier.purify(
@@ -166,41 +180,37 @@ actor M3U8Purifier {
             }
         }
         let sortedTargetIndices = targetIndices.sorted()
-        let sampledTargetIndices: [Int]
-        if sortedTargetIndices.count <= 5 {
-            sampledTargetIndices = sortedTargetIndices
-        } else {
-            let lastIndex = sortedTargetIndices.count - 1
-            sampledTargetIndices = (0..<5).map { sample in
-                sortedTargetIndices[(sample * lastIndex) / 4]
-            }
-        }
-        let targets = sampledTargetIndices.compactMap { index -> String? in
-            groups[index].segmentURLs.first
-        }
-        guard !targets.isEmpty else { return [:] }
+        guard !sortedTargetIndices.isEmpty else { return [:] }
 
         let network = self.network
-        let probedSignatures = await withTaskGroup(of: (String, String?).self) { group in
-            var signatures: [String: String] = [:]
-            for segmentURL in targets {
+        // 安卓端会探测所有短组及其相邻组，而不是只抽样五组。每组首片可能
+        // 被 CDN 边缘节点拒绝，因此按顺序最多尝试前三片，拿到一份有效 SPS
+        // 后复用于该组的所有分片。
+        let probedSignatures = await withTaskGroup(of: (Int, String?).self) { group in
+            var signatures: [Int: String] = [:]
+            for index in sortedTargetIndices {
                 group.addTask {
-                    (segmentURL, await Self.probeSps(
-                        segmentURL,
-                        headers: headers,
-                        network: network
-                    ))
+                    let candidates = groups[index].segmentURLs.prefix(3)
+                    for segmentURL in candidates {
+                        if let signature = await Self.probeSps(
+                            segmentURL,
+                            headers: headers,
+                            network: network
+                        ) {
+                            return (index, signature)
+                        }
+                    }
+                    return (index, nil)
                 }
             }
-            while let (segmentURL, signature) = await group.next() {
-                if let signature { signatures[segmentURL] = signature }
+            while let (index, signature) = await group.next() {
+                if let signature { signatures[index] = signature }
             }
             return signatures
         }
         var groupSignatures: [String: String] = [:]
-        for probeGroup in groups {
-            guard let firstURL = probeGroup.segmentURLs.first,
-                  let signature = probedSignatures[firstURL] else {
+        for (index, probeGroup) in groups.enumerated() {
+            guard let signature = probedSignatures[index] else {
                 continue
             }
             for segmentURL in probeGroup.segmentURLs {
@@ -246,7 +256,10 @@ actor M3U8Purifier {
         headers: [String: String],
         network: NetworkManager
     ) async -> String? {
-        var requestHeaders = headers
+        var requestHeaders = xiguaRequestHeaders(
+            for: URL(string: url),
+            headers: headers
+        )
         requestHeaders["Range"] = "bytes=0-524287"
         for attempt in 0...1 {
             do {
@@ -268,10 +281,41 @@ actor M3U8Purifier {
 
     private static func isXiguaProbeHost(_ host: String?) -> Bool {
         guard let host = host?.lowercased() else { return false }
-        return host.range(
-            of: #"(?:^|\.)(?:xgplay\d*|xgzy|jimxtc)\."#,
-            options: .regularExpression
-        ) != nil
+        return host.contains("xgplay")
+            || host.contains("xgzy")
+            || host.contains("jimxtc")
+            || host.contains("xigua")
+    }
+
+    private static func xiguaSourceKey(_ sourceKey: String) -> Bool {
+        let key = sourceKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return key == "xgzy" || key == "xigua" || key == "xiguazy"
+            || key.contains("xgzy") || key.contains("xigua")
+    }
+
+    /// 西瓜清单和分片对请求来源有校验。保留调用方已有的播放头，
+    /// 仅补齐安卓端净化探测所必需的默认头，避免探测 403 被误判为无广告。
+    private static func xiguaRequestHeaders(
+        for url: URL?,
+        headers: [String: String],
+        force: Bool = false
+    ) -> [String: String] {
+        guard force || isXiguaProbeHost(url?.host) else { return headers }
+        var result = headers
+        func setIfMissing(_ name: String, _ value: String) {
+            guard !result.keys.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) else {
+                return
+            }
+            result[name] = value
+        }
+        setIfMissing(
+            "User-Agent",
+            "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
+        )
+        setIfMissing("Referer", "https://xgzy.tv/")
+        setIfMissing("Origin", "https://xgzy.tv")
+        setIfMissing("Accept", "*/*")
+        return result
     }
 
     private static func isHTTPURL(_ url: URL) -> Bool {
@@ -661,10 +705,13 @@ struct M3U8ManifestPurifier {
                 let duration = groups[groupIndex].compactMap(parseDuration).reduce(0) { $0 + $1.value }
                 return segmentCount <= 3 || duration <= 12
             }
-            // A single short group is ambiguous: the same alternate SPS can
-            // represent a legitimate encode switch elsewhere in the episode.
+            // 与安卓端一致：连续异常组，或同一异常 SPS 在清单中重复出现，
+            // 才允许删除。这样既能处理只有一个短广告组的清单，也不会把
+            // 一次性的正常编码切换误判为广告。
+            let repeatedVariant = run.count > 1
+                || signatureCounts[groupSignatures[start], default: 0] > 1
             if bounded, runDuration > 0, runDuration <= 90,
-               runSegments <= 18, hasShortBoundary, run.count > 1 {
+               runSegments <= 18, hasShortBoundary, repeatedVariant {
                 drop.formUnion(run)
             }
             index += 1

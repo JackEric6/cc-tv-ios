@@ -726,6 +726,10 @@ struct VerifyM3U8Purifier {
                 xiguaProbeLines.append(segmentURL)
                 if segment == 0 {
                     probeData[segmentURL] = group == 1 || group == 2 ? adTS : mainTS
+                } else if group == 3 && segment == 2 {
+                    // The first two parts of this group fail, but Android's
+                    // rule retries the third part before giving up.
+                    probeData[segmentURL] = mainTS
                 }
             }
         }
@@ -748,8 +752,12 @@ struct VerifyM3U8Purifier {
             sourceKey: "xgzy"
         )
         precondition(
-            NetworkManager.shared.requestedDataURLs.count == 5,
-            "Probe flow should sample one segment per bounded group"
+            NetworkManager.shared.requestedDataURLs.count == 9,
+            "Probe flow should inspect every bounded group and fall back to the third segment"
+        )
+        precondition(
+            NetworkManager.shared.requestedDataURLs.contains("https://svip.xgplay13.com/series/3-2.ts?token=3-2"),
+            "Probe flow must try the third segment when the first two fail"
         )
         precondition(
             xiguaProbePrepared.didPurify && xiguaProbePrepared.removedSegmentCount == 6,
@@ -822,11 +830,11 @@ struct VerifyM3U8Purifier {
             segmentSignatures: intermittentVariantSignatures
         )
         precondition(
-            intermittentVariantResult.removedSegmentCount == 0,
-            "Repeated alternate SPS groups separated by the main encoding should be preserved"
+            intermittentVariantResult.removedSegmentCount == 6,
+            "Repeated alternate SPS groups must follow Android's repeated-variant rule"
         )
-        precondition(intermittentVariantResult.content.contains("alternate-a-0.ts"))
-        precondition(intermittentVariantResult.content.contains("alternate-b-0.ts"))
+        precondition(!intermittentVariantResult.content.contains("alternate-a-0.ts"))
+        precondition(!intermittentVariantResult.content.contains("alternate-b-0.ts"))
 
         let redirectedMasterURL = "https://origin.example/redirect/master.m3u8?ticket=one"
         let redirectedMasterFinalURL = "https://media.example/live/master.m3u8?session=two"
