@@ -19,8 +19,8 @@ Actions 运行本身保存在 GitHub；此文件将重要构建与源码提交�
 
 ## 版本标记
 
-- `MARKETING_VERSION`: `1.0.8`
-- `CURRENT_PROJECT_VERSION`: `12`
+- `MARKETING_VERSION`: `1.0.11`
+- `CURRENT_PROJECT_VERSION`: `15`
 - 版本字段定义在 `project.yml`；日常迭代由 Git commit 和 Actions run 追踪。发布到需要唯一构建号的平台前，应先提升构建号。
 
 ## 构建产物

@@ -772,6 +772,39 @@ struct VerifyM3U8Purifier {
         precondition(!xiguaProbeOutput.contains("1-0.ts") && !xiguaProbeOutput.contains("2-0.ts"))
         precondition(xiguaProbeOutput.contains("0-0.ts") && xiguaProbeOutput.contains("3-0.ts"))
 
+        // A temporary player/proxy failure must be recoverable without
+        // returning the original ad-bearing playlist. Re-publishing the
+        // cached purified manifest keeps the filtered duration stable.
+        let republishedXigua = await M3U8Purifier.shared.republishCached(
+            urlString: xiguaProbeMasterURL
+        )
+        precondition(
+            republishedXigua?.didPurify == true,
+            "A previously purified manifest must be available for recovery"
+        )
+        precondition(
+            republishedXigua?.removedSegmentCount == xiguaProbePrepared.removedSegmentCount,
+            "Recovery must preserve the original filtered segment count"
+        )
+        if let republishedXigua {
+            precondition(
+                republishedXigua.url != xiguaProbePrepared.url,
+                "Recovery must publish a fresh loopback slot"
+            )
+            let (recoveredData, _) = try await URLSession.shared.data(
+                from: URL(string: republishedXigua.url)!
+            )
+            let recoveredOutput = String(decoding: recoveredData, as: UTF8.self)
+            precondition(
+                !recoveredOutput.contains("1-0.ts") && !recoveredOutput.contains("2-0.ts"),
+                "Recovery must not reintroduce the filtered ad groups"
+            )
+            precondition(
+                recoveredOutput.contains("0-0.ts") && recoveredOutput.contains("3-0.ts"),
+                "Recovery must keep playable main-program segments"
+            )
+        }
+
         var oneVariantLines = ["#EXTM3U", "#EXT-X-TARGETDURATION:8"]
         let oneVariantSignatures = [
             "https://cdn.example/video/main-1.ts": "main",

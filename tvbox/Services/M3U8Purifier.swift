@@ -52,9 +52,18 @@ actor M3U8Purifier {
         let removedSegmentCount: Int
     }
 
+    private struct CachedManifest {
+        let content: String
+        let removedSegmentCount: Int
+        var lastAccess: UInt64
+    }
+
     private let network = NetworkManager.shared
     private let proxy = M3U8LoopbackProxy.shared
     private var hostRules: [M3U8HostRule] = []
+    private var cacheSequence: UInt64 = 0
+    private var purifiedManifestCache: [String: CachedManifest] = [:]
+    private let purifiedManifestCacheLimit = 24
 
     func updateHostRules(_ rules: [M3U8HostRule]) {
         hostRules = rules
@@ -140,6 +149,13 @@ actor M3U8Purifier {
                 // and bypass the player's normal variant selection.
                 return PreparedURL(url: urlString, didPurify: false, removedSegmentCount: 0)
             }
+            cacheSequence &+= 1
+            purifiedManifestCache[url.absoluteString] = CachedManifest(
+                content: result.content,
+                removedSegmentCount: result.removedSegmentCount,
+                lastAccess: cacheSequence
+            )
+            trimPurifiedManifestCache()
             return PreparedURL(
                 url: proxyURL,
                 didPurify: true,
@@ -148,6 +164,41 @@ actor M3U8Purifier {
         } catch {
             // 净化是增强能力，网络失败不能阻断原始播放链路。
             return PreparedURL(url: urlString, didPurify: false, removedSegmentCount: 0)
+        }
+    }
+
+    /// 重新发布当前播放会话已经成功净化过的清单。
+    ///
+    /// 播放器可能因为网络切换、KSPlayer 重建或本地回环槽位被回收而
+    /// 再次请求清单。此时必须复用同一份已净化内容，不能把原始地址交回
+    /// 播放器，否则广告会重新出现、总时长也会跳回未净化值。
+    func republishCached(urlString: String) async -> PreparedURL? {
+        let key = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, var cached = purifiedManifestCache[key] else {
+            return nil
+        }
+        guard let proxyURL = await publishWithRetry(content: cached.content) else {
+            return nil
+        }
+        cacheSequence &+= 1
+        cached.lastAccess = cacheSequence
+        purifiedManifestCache[key] = cached
+        return PreparedURL(
+            url: proxyURL,
+            didPurify: true,
+            removedSegmentCount: cached.removedSegmentCount
+        )
+    }
+
+    private func trimPurifiedManifestCache() {
+        guard purifiedManifestCache.count > purifiedManifestCacheLimit else { return }
+        let removeCount = purifiedManifestCache.count - purifiedManifestCacheLimit
+        let keys = purifiedManifestCache
+            .sorted { $0.value.lastAccess < $1.value.lastAccess }
+            .prefix(removeCount)
+            .map(\.key)
+        for key in keys {
+            purifiedManifestCache.removeValue(forKey: key)
         }
     }
 
@@ -369,7 +420,11 @@ actor M3U8LoopbackProxy {
     private var sequence: UInt64 = 0
     private var slots: [String: Slot] = [:]
     private var readyWaiters: [CheckedContinuation<UInt16, Error>] = []
-    private let slotLimit = 8
+    // A detail page can prefetch qualities, switch episodes and briefly keep
+    // the previous player alive during replacement. Eight slots made the
+    // currently playing manifest easy to evict, which surfaced as a 404 and
+    // triggered an unsafe fallback to the original ad-bearing URL.
+    private let slotLimit = 64
 
     func publish(content: String) async throws -> String {
         let port = try await startIfNeeded()

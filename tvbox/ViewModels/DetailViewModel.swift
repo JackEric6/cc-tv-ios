@@ -76,6 +76,10 @@ class DetailViewModel: ObservableObject {
     private var danmakuPrefetchKey: String?
     private var playableResolveToken = UUID()
     private var purifierFallbackURL: String?
+    /// 净化清单播放失败时，后台重新发布同一份净化清单，绝不回退到原始广告地址。
+    private var purifiedPlaybackRecoveryTask: Task<Void, Never>?
+    private var purifiedPlaybackRecoveryAttempts = 0
+    private let maxPurifiedPlaybackRecoveryAttempts = 3
     private var activePlaybackHeaders: [String: String]?
     private var playbackStartupWatchdogTask: Task<Void, Never>?
     private var playbackStartupPosition: Double = 0
@@ -158,6 +162,9 @@ class DetailViewModel: ObservableObject {
         }
         attemptedPlaybackFlags.removeAll()
         cancelPlaybackStartupWatchdog()
+        purifiedPlaybackRecoveryTask?.cancel()
+        purifiedPlaybackRecoveryTask = nil
+        purifiedPlaybackRecoveryAttempts = 0
         purifierFallbackURL = nil
         activePlaybackHeaders = nil
         let loadToken = UUID()
@@ -193,6 +200,9 @@ class DetailViewModel: ObservableObject {
         playableResolveTask?.cancel()
         playableResolveTask = nil
         playableResolveToken = UUID()
+        purifiedPlaybackRecoveryTask?.cancel()
+        purifiedPlaybackRecoveryTask = nil
+        purifiedPlaybackRecoveryAttempts = 0
 
         isLoading = true
         errorMessage = nil
@@ -755,6 +765,9 @@ class DetailViewModel: ObservableObject {
         resumeSeconds = progress
         realtimeProgressSeconds = progress
         cancelPlaybackStartupWatchdog()
+        purifiedPlaybackRecoveryTask?.cancel()
+        purifiedPlaybackRecoveryTask = nil
+        purifiedPlaybackRecoveryAttempts = 0
         purifierFallbackURL = nil
         playUrl = validURL
     }
@@ -889,6 +902,9 @@ class DetailViewModel: ObservableObject {
         let requestFlag = selectedFlag
         let requestEpisodeIndex = selectedEpisodeIndex
         cancelPlaybackStartupWatchdog()
+        purifiedPlaybackRecoveryTask?.cancel()
+        purifiedPlaybackRecoveryTask = nil
+        purifiedPlaybackRecoveryAttempts = 0
         purifierFallbackURL = nil
         activePlaybackHeaders = nil
 
@@ -915,6 +931,7 @@ class DetailViewModel: ObservableObject {
                       self.selectedEpisodeIndex == requestEpisodeIndex else { return }
                 self.activePlaybackHeaders = headers
                 self.purifierFallbackURL = prepared.didPurify ? selectedURL : nil
+                self.purifiedPlaybackRecoveryAttempts = 0
                 self.playUrl = prepared.url
                 self.isPlaying = true
                 self.isResolvingPlaybackURL = false
@@ -981,6 +998,7 @@ class DetailViewModel: ObservableObject {
                   self.selectedEpisodeIndex == requestEpisodeIndex else { return }
             self.activePlaybackHeaders = resolution.headers
             self.purifierFallbackURL = prepared.didPurify ? validURL : nil
+            self.purifiedPlaybackRecoveryAttempts = 0
             self.playUrl = prepared.url
             self.isPlaying = true
             self.isResolvingPlaybackURL = false
@@ -1078,19 +1096,8 @@ class DetailViewModel: ObservableObject {
     }
 
     func recoverFromPlaybackFailure() {
-        if let fallbackURL = purifierFallbackURL, playUrl != fallbackURL {
-            cancelPlaybackStartupWatchdog()
-            purifierFallbackURL = nil
-            playUrl = fallbackURL
-            isPlaying = true
-            isResolvingPlaybackURL = false
-            errorMessage = nil
-            shouldRetryAfterNetworkRecovery = false
-            armPlaybackStartupWatchdog(
-                preparedURL: fallbackURL,
-                fallbackURL: nil,
-                token: playableResolveToken
-            )
+        if purifierFallbackURL != nil {
+            recoverFromPurifiedPlaybackFailure()
             return
         }
         guard !advancePlaybackRouteAfterFailure() else { return }
@@ -1099,6 +1106,93 @@ class DetailViewModel: ObservableObject {
         isPlaying = false
         isResolvingPlaybackURL = false
         errorMessage = "当前影片的所有播放线路均失败，请更换片源或稍后重试"
+    }
+
+    /// 净化后的回环清单失效时，只能重建另一份净化清单。
+    ///
+    /// 旧实现把 `purifierFallbackURL` 当成普通播放保底地址，导致本地
+    /// 净化代理偶发 404/网络重连后，播放器重新加载带广告的原始清单，
+    /// 于是总时长从约 2:21:07 跳回 2:21:28。这里先复用缓存内容，
+    /// 缓存不存在时再重新抓取并净化；两条路径都不会把原始地址交给播放器。
+    private func recoverFromPurifiedPlaybackFailure() {
+        guard let originalURL = purifierFallbackURL,
+              let source = currentSource,
+              purifiedPlaybackRecoveryTask == nil else {
+            return
+        }
+
+        if purifiedPlaybackRecoveryAttempts >= maxPurifiedPlaybackRecoveryAttempts {
+            purifierFallbackURL = nil
+            guard !advancePlaybackRouteAfterFailure() else { return }
+            cancelPlaybackStartupWatchdog()
+            playUrl = nil
+            isPlaying = false
+            isResolvingPlaybackURL = false
+            errorMessage = "净化播放清单无法恢复，请稍后重试或更换片源"
+            return
+        }
+
+        purifiedPlaybackRecoveryAttempts += 1
+        let attempt = purifiedPlaybackRecoveryAttempts
+        let token = playableResolveToken
+        let headers = activePlaybackHeaders ?? playbackHeaders(for: source, mediaURL: originalURL)
+        let sourceKey = source.key
+        isResolvingPlaybackURL = true
+        cancelPlaybackStartupWatchdog()
+
+        purifiedPlaybackRecoveryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let cached = await M3U8Purifier.shared.republishCached(urlString: originalURL)
+            let prepared: M3U8Purifier.PreparedURL
+            if let cached {
+                prepared = cached
+            } else {
+                prepared = await M3U8Purifier.shared.prepare(
+                    urlString: originalURL,
+                    headers: headers,
+                    sourceKey: sourceKey
+                )
+            }
+
+            guard !Task.isCancelled,
+                  self.playableResolveToken == token,
+                  self.currentSource?.key == sourceKey,
+                  self.purifierFallbackURL == originalURL else {
+                self.purifiedPlaybackRecoveryTask = nil
+                return
+            }
+
+            guard prepared.didPurify else {
+                self.purifiedPlaybackRecoveryTask = nil
+                self.isResolvingPlaybackURL = false
+                if attempt < self.maxPurifiedPlaybackRecoveryAttempts {
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    guard !Task.isCancelled else { return }
+                    self.recoverFromPurifiedPlaybackFailure()
+                } else {
+                    self.purifierFallbackURL = nil
+                    guard !self.advancePlaybackRouteAfterFailure() else { return }
+                    self.playUrl = nil
+                    self.isPlaying = false
+                    self.errorMessage = "净化播放清单无法恢复，请稍后重试或更换片源"
+                }
+                return
+            }
+
+            self.purifiedPlaybackRecoveryTask = nil
+            self.purifiedPlaybackRecoveryAttempts = 0
+            self.purifierFallbackURL = originalURL
+            self.playUrl = prepared.url
+            self.isPlaying = true
+            self.isResolvingPlaybackURL = false
+            self.errorMessage = nil
+            self.shouldRetryAfterNetworkRecovery = false
+            self.armPlaybackStartupWatchdog(
+                preparedURL: prepared.url,
+                fallbackURL: originalURL,
+                token: token
+            )
+        }
     }
 
     @discardableResult
