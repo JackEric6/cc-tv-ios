@@ -8,8 +8,8 @@ struct VerifyPlaybackVideoContentRect {
             videoSize: CGSize(width: 2560, height: 968),
             contentMode: .aspectFit
         )
-        expect(ultraWideFit.minY, 105.375, "letterboxed ultra-wide top edge")
-        expect(ultraWideFit.height, 431.25, "letterboxed ultra-wide height")
+        expect(ultraWideFit.minY, 105.46875, "letterboxed ultra-wide top edge")
+        expect(ultraWideFit.height, 431.0625, "letterboxed ultra-wide height")
         expect(ultraWideFit.maxX, 1140, "letterboxed ultra-wide right edge")
 
         let portraitFit = PlaybackVideoContentRectPolicy.videoRect(
