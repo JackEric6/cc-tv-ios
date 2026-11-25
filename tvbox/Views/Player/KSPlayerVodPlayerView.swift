@@ -28,6 +28,63 @@ fileprivate enum PlaybackAspectRatio: String, CaseIterable {
     }
 }
 
+private final class PlayerBrandingWatermarkView: UIView {
+    private let label = UILabel()
+    private var videoSize = CGSize.zero
+    private var videoContentMode = PlaybackVideoContentMode.aspectFit
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        isOpaque = false
+        backgroundColor = .clear
+        accessibilityElementsHidden = true
+
+        label.text = "丛丛影视"
+        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        label.textColor = UIColor.white.withAlphaComponent(0.92)
+        label.shadowColor = UIColor.black.withAlphaComponent(0.9)
+        label.shadowOffset = CGSize(width: 0, height: 1)
+        label.isUserInteractionEnabled = false
+        label.sizeToFit()
+        addSubview(label)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func update(videoSize: CGSize, contentMode: PlaybackVideoContentMode) {
+        guard self.videoSize != videoSize || videoContentMode != contentMode else { return }
+        self.videoSize = videoSize
+        videoContentMode = contentMode
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        label.sizeToFit()
+        let videoRect = PlaybackVideoContentRectPolicy.videoRect(
+            in: bounds.size,
+            videoSize: videoSize,
+            contentMode: videoContentMode
+        )
+        guard let frame = PlaybackVideoContentRectPolicy.watermarkFrame(
+            in: videoRect,
+            labelSize: label.bounds.size,
+            inset: 14
+        ) else {
+            label.isHidden = true
+            return
+        }
+        label.isHidden = false
+        if label.frame != frame {
+            label.frame = frame
+        }
+    }
+}
+
 extension Notification.Name {
     static let congcongPlaybackSessionWillChange = Notification.Name(
         "CongcongPlaybackSessionWillChange"
@@ -196,6 +253,7 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
     private var seekRequestID = 0
     private var autoplayRetryWorkItem: DispatchWorkItem?
     private var selectedAspectRatio: PlaybackAspectRatio = .original
+    private var brandingWatermarkView: PlayerBrandingWatermarkView?
     private weak var aspectRatioRenderView: UIView?
     private var aspectRatioEdgeConstraints: [NSLayoutConstraint] = []
     private var aspectRatioViewportConstraints: [NSLayoutConstraint] = []
@@ -374,7 +432,51 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
     override func layoutSubviews() {
         super.layoutSubviews()
         applyDisplayAspectRatio(selectedAspectRatio, isFullscreenLandscape: isAspectRatioFullscreen)
+        refreshBrandingWatermark()
         customControlsFitLayout?()
+    }
+
+    private func refreshBrandingWatermark() {
+        guard let renderView = playerLayer?.player.view else {
+            brandingWatermarkView?.removeFromSuperview()
+            brandingWatermarkView = nil
+            return
+        }
+
+        let watermark: PlayerBrandingWatermarkView
+        if let current = brandingWatermarkView {
+            watermark = current
+        } else {
+            watermark = PlayerBrandingWatermarkView()
+            brandingWatermarkView = watermark
+        }
+
+        if watermark.superview !== renderView {
+            watermark.removeFromSuperview()
+            watermark.frame = renderView.bounds
+            watermark.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            renderView.addSubview(watermark)
+            renderView.bringSubviewToFront(watermark)
+        }
+        watermark.update(
+            videoSize: playerLayer?.player.naturalSize ?? .zero,
+            contentMode: Self.watermarkContentMode(for: playerLayer?.player.contentMode ?? .scaleAspectFit)
+        )
+    }
+
+    private static func watermarkContentMode(
+        for contentMode: UIView.ContentMode
+    ) -> PlaybackVideoContentMode {
+        switch contentMode {
+        case .scaleAspectFill:
+            return .aspectFill
+        case .scaleToFill:
+            return .stretch
+        case .center:
+            return .center
+        default:
+            return .aspectFit
+        }
     }
 
     fileprivate func applyDisplayAspectRatio(
@@ -576,6 +678,7 @@ private final class CongcongKSVideoPlayerView: IOSVideoPlayerView, UIGestureReco
     override func player(layer: KSPlayerLayer, state: KSPlayerState) {
         guard playerLayer === layer else { return }
         super.player(layer: layer, state: state)
+        refreshBrandingWatermark()
         installFirstFrameObservation(for: layer)
         // KSPlayer's centered replay button is redundant with the toolbar
         // play button in this app. It is especially distracting while a new

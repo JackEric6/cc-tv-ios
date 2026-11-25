@@ -353,6 +353,14 @@ jobs:
             -o /tmp/verify-playback-video-frame
           /tmp/verify-playback-video-frame
 
+      - name: Verify playback watermark follows video content
+        run: |
+          swiftc -parse-as-library \
+            tvbox/Models/PlaybackVideoContentRectPolicy.swift \
+            scripts/verify-playback-video-content-rect.swift \
+            -o /tmp/verify-playback-video-content-rect
+          /tmp/verify-playback-video-content-rect
+
       - name: Build unsigned app
         run: |
           set -o pipefail
@@ -386,8 +394,8 @@ jobs:
           import json
           sources = json.loads(source_config.read_text(encoding="utf-8"))["sites"]
           project_spec = Path("project.yml").read_text(encoding="utf-8")
-          assert 'CURRENT_PROJECT_VERSION: "15"' in project_spec
-          assert 'MARKETING_VERSION: "1.0.11"' in project_spec
+          assert 'CURRENT_PROJECT_VERSION: "16"' in project_spec
+          assert 'MARKETING_VERSION: "1.0.12"' in project_spec
           assert len(sources) == 47
           assert len({item["key"] for item in sources}) == 47
           assert all(item["key"] not in {"yutu", "jianpian", "fan_jianpian", "fan_jp"} for item in sources)
@@ -413,8 +421,8 @@ jobs:
           assert info["CFBundleExecutable"] == "CongcongTV"
           assert info["CFBundlePackageType"] == "APPL"
           assert info["CFBundleDisplayName"] == "CongcongTV"
-          assert info["CFBundleShortVersionString"] == "1.0.11"
-          assert info["CFBundleVersion"] == "15"
+          assert info["CFBundleShortVersionString"] == "1.0.12"
+          assert info["CFBundleVersion"] == "16"
           assert info["MinimumOSVersion"] == "17.0"
           assert (app / info["CFBundleExecutable"]).is_file()
           assert (app / "xgzy_config_all.json").is_file()
@@ -434,7 +442,7 @@ jobs:
       - name: Upload IPA and build log
         uses: actions/upload-artifact@v4
         with:
-          name: CongcongTV-iOS-1.0.11-unsigned-ipa
+          name: CongcongTV-iOS-1.0.12-unsigned-ipa
           path: |
             CongcongTV-unsigned-*.ipa
             build.log
