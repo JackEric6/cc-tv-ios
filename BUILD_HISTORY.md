@@ -4,6 +4,7 @@ Actions 运行本身保存在 GitHub；此文件将重要构建与源码提交�
 
 | 时间（UTC） | 分支 | 源码提交 | 结果 | Actions 运行 |
 | --- | --- | --- | --- | --- |
+| 2026-11-25 05:25 | `main` | `d89b233` | 成功；版本 `1.0.12 (16)`，水印画面定位回归、iOS Release 编译、包元数据核验和 IPA 打包通过；本地保留 `CongcongTV-unsigned-1.0.12.ipa` | [45552544710](https://github.com/JackEric6/cc-tv-ios/actions/runs/45552544710) |
 | 2026-11-20 12:03 | `main` | `468f2e1` | 成功并已发布；版本 `1.0.8 (12)`，Windows 西瓜 SPS 插片净化迁移、切集首帧恢复及回归检查通过；IPA 已附加到 Release | [44731169006](https://github.com/JackEric6/cc-tv-ios/actions/runs/44731169006) · [Release 1.0.8](https://github.com/JackEric6/cc-tv-ios/releases/tag/1.0.8) |
 | 2026-11-04 23:44 | `main` | `e3b3c0e` | 成功并已发布；恢复 1.0.6 播放器按钮宽度与间距，版本 `1.0.7 (11)`；CI runner 调整提交 `7ef18a1`；Release 编译、布局及源码校验、元数据检查、IPA 打包和上传均通过 | [41934499545](https://github.com/JackEric6/cc-tv-ios/actions/runs/41934499545) · [Release 1.0.7](https://github.com/JackEric6/cc-tv-ios/releases/tag/1.0.7) |
 | 2026-11-04 14:43 | `main` | `40e238b` | 成功；版本 `1.0.7 (10)`，全控件横屏布局回归、Release 编译、元数据校验及 IPA 打包通过；本地保留未签名 IPA | [41848448122](https://github.com/JackEric6/cc-tv-ios/actions/runs/41848448122) |
